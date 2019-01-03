@@ -1,0 +1,7 @@
+adapters:
+  tapjoy:
+    enabled: true
+    endpoint: https://bid.tapjoy.com/bid
+    pbs-enforces-gdpr: true
+    deprecated-names:
+    aliases:

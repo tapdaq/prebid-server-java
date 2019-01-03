@@ -1,0 +1,24 @@
+{
+  "$schema": "http://json-schema.org/draft-04/schema#",
+  "title": "Tapjoy Adapter Params",
+  "description": "A schema which validates params accepted by the Tapjoy adapter",
+  "type": "object",
+  "properties": {
+    "sdk_key": {
+      "type": "string",
+      "description": "The publisher's Tapjoy SDK key"
+    },
+    "placement_name": {
+      "type": "string",
+      "description": "The publisher's Tapjoy placement name"
+    },
+    "token": {
+      "type": "string",
+      "description": "Tapjoy internal device token that can be optionally fetched from the SDK at app init"
+    }
+  },
+  "required": [
+    "sdk_key",
+    "placement_name"
+  ]
+}
