@@ -1,19 +1,13 @@
 package org.prebid.server.spring.config.bidder;
 
-import org.prebid.server.bidder.Adapter;
-import org.prebid.server.bidder.Bidder;
 import org.prebid.server.bidder.BidderDeps;
-import org.prebid.server.bidder.BidderRequester;
-import org.prebid.server.bidder.HttpAdapterConnector;
-import org.prebid.server.bidder.HttpBidderRequester;
-import org.prebid.server.bidder.MetaInfo;
-import org.prebid.server.bidder.Usersyncer;
 import org.prebid.server.bidder.rhythmone.RhythmoneBidder;
-import org.prebid.server.bidder.rhythmone.RhythmoneMetaInfo;
-import org.prebid.server.bidder.rhythmone.RhythmoneUsersyncer;
+import org.prebid.server.json.JacksonMapper;
 import org.prebid.server.spring.config.bidder.model.BidderConfigurationProperties;
+import org.prebid.server.spring.config.bidder.util.BidderDepsAssembler;
+import org.prebid.server.spring.config.bidder.util.BidderInfoCreator;
+import org.prebid.server.spring.config.bidder.util.UsersyncerCreator;
 import org.prebid.server.spring.env.YamlPropertySourceFactory;
-import org.prebid.server.vertx.http.HttpClient;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
@@ -22,20 +16,24 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.PropertySource;
 
-import java.util.List;
+import javax.validation.constraints.NotBlank;
 
 @Configuration
 @PropertySource(value = "classpath:/bidder-config/rhythmone.yaml", factory = YamlPropertySourceFactory.class)
-public class RhythmoneConfiguration extends BidderConfiguration {
+public class RhythmoneConfiguration {
 
     private static final String BIDDER_NAME = "rhythmone";
+
+    @Value("${external-url}")
+    @NotBlank
+    private String externalUrl;
+
+    @Autowired
+    private JacksonMapper mapper;
 
     @Autowired
     @Qualifier("rhythmoneConfigurationProperties")
     private BidderConfigurationProperties configProperties;
-
-    @Value("${external-url}")
-    private String externalUrl;
 
     @Bean("rhythmoneConfigurationProperties")
     @ConfigurationProperties("adapters.rhythmone")
@@ -44,48 +42,12 @@ public class RhythmoneConfiguration extends BidderConfiguration {
     }
 
     @Bean
-    BidderDeps rhythmOneBidderDeps(HttpClient httpClient, HttpAdapterConnector httpAdapterConnector) {
-        return bidderDeps(httpClient, httpAdapterConnector);
-    }
-
-    @Override
-    protected String bidderName() {
-        return BIDDER_NAME;
-    }
-
-    @Override
-    protected List<String> deprecatedNames() {
-        return configProperties.getDeprecatedNames();
-    }
-
-    @Override
-    protected List<String> aliases() {
-        return configProperties.getAliases();
-    }
-
-    @Override
-    protected MetaInfo createMetaInfo() {
-        return new RhythmoneMetaInfo(configProperties.getEnabled(), configProperties.getPbsEnforcesGdpr());
-    }
-
-    @Override
-    protected Usersyncer createUsersyncer() {
-        return new RhythmoneUsersyncer(configProperties.getUsersyncUrl(), externalUrl);
-    }
-
-    @Override
-    protected Bidder<?> createBidder(MetaInfo metaInfo) {
-        return new RhythmoneBidder(configProperties.getEndpoint());
-    }
-
-    @Override
-    protected Adapter<?, ?> createAdapter(Usersyncer usersyncer) {
-        return null;
-    }
-
-    @Override
-    protected BidderRequester createBidderRequester(HttpClient httpClient, Bidder<?> bidder, Adapter<?, ?> adapter,
-                                                    Usersyncer usersyncer, HttpAdapterConnector httpAdapterConnector) {
-        return new HttpBidderRequester<>(bidder, httpClient);
+    BidderDeps rhythmOneBidderDeps() {
+        return BidderDepsAssembler.forBidder(BIDDER_NAME)
+                .withConfig(configProperties)
+                .bidderInfo(BidderInfoCreator.create(configProperties))
+                .usersyncerCreator(UsersyncerCreator.create(configProperties.getUsersync(), externalUrl))
+                .bidderCreator(() -> new RhythmoneBidder(configProperties.getEndpoint(), mapper))
+                .assemble();
     }
 }

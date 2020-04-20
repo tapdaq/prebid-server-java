@@ -68,10 +68,8 @@ import static org.mockito.BDDMockito.given;
 public class AppnexusAdapterTest extends VertxTest {
 
     private static final String BIDDER = "appnexus";
-    private static final String BIDDER_COOKIE = "adnxs";
+    private static final String COOKIE_FAMILY = "adnxs";
     private static final String ENDPOINT_URL = "http://endpoint.org/";
-    private static final String USERSYNC_URL = "//usersync.org/";
-    private static final String EXTERNAL_URL = "http://external.org/";
     private static final Integer BANNER_TYPE = 0;
     private static final Integer VIDEO_TYPE = 1;
 
@@ -85,26 +83,24 @@ public class AppnexusAdapterTest extends VertxTest {
     private PreBidRequestContext preBidRequestContext;
     private ExchangeCall<BidRequest, BidResponse> exchangeCall;
     private AppnexusAdapter adapter;
-    private AppnexusUsersyncer usersyncer;
 
     @Before
     public void setUp() {
         adapterRequest = givenBidder(identity(), identity());
         preBidRequestContext = givenPreBidRequestContext(identity(), identity());
-        usersyncer = new AppnexusUsersyncer(USERSYNC_URL, EXTERNAL_URL);
-        adapter = new AppnexusAdapter(usersyncer, ENDPOINT_URL);
+        adapter = new AppnexusAdapter(COOKIE_FAMILY, ENDPOINT_URL, jacksonMapper);
     }
 
     @Test
     public void creationShouldFailOnNullArguments() {
-        assertThatNullPointerException().isThrownBy(() -> new AppnexusAdapter(null, null));
-        assertThatNullPointerException().isThrownBy(() -> new AppnexusAdapter(usersyncer, null));
+        assertThatNullPointerException().isThrownBy(() -> new AppnexusAdapter(null, null, jacksonMapper));
+        assertThatNullPointerException().isThrownBy(() -> new AppnexusAdapter(COOKIE_FAMILY, null, jacksonMapper));
     }
 
     @Test
     public void creationShouldFailOnInvalidEndpointUrl() {
         assertThatIllegalArgumentException()
-                .isThrownBy(() -> new AppnexusAdapter(usersyncer, "invalid_url"))
+                .isThrownBy(() -> new AppnexusAdapter(COOKIE_FAMILY, "invalid_url", jacksonMapper))
                 .withMessage("URL supplied is not valid: invalid_url");
     }
 
@@ -180,8 +176,7 @@ public class AppnexusAdapterTest extends VertxTest {
                 givenAdUnitBid(builder -> builder
                                 .adUnitCode("adUnitCode1")
                                 .mediaTypes(emptySet()),
-                        identity()
-                )));
+                        identity())));
 
         preBidRequestContext = givenPreBidRequestContext(identity(), identity());
 
@@ -231,15 +226,16 @@ public class AppnexusAdapterTest extends VertxTest {
                         .ua("userAgent"),
                 builder -> builder
                         .tid("tid1")
-                        .user(User.builder().ext(mapper.valueToTree(ExtUser.of(null, "consent", null))).build())
-                        .regs(Regs.of(0, mapper.valueToTree(ExtRegs.of(1))))
+                        .user(User.builder()
+                                .ext(mapper.valueToTree(ExtUser.builder().consent("consent").build()))
+                                .build())
+                        .regs(Regs.of(0, mapper.valueToTree(ExtRegs.of(1, null))))
                         .timeoutMillis(1500L)
                         .device(Device.builder()
                                 .pxratio(new BigDecimal("4.2"))
-                                .build())
-        );
+                                .build()));
 
-        given(uidsCookie.uidFrom(eq(BIDDER_COOKIE))).willReturn("buyerUid");
+        given(uidsCookie.uidFrom(eq(COOKIE_FAMILY))).willReturn("buyerUid");
 
         // when
         final List<AdapterHttpRequest<BidRequest>> httpRequests = adapter.makeHttpRequests(adapterRequest,
@@ -280,9 +276,9 @@ public class AppnexusAdapterTest extends VertxTest {
                         .user(User.builder()
                                 .buyeruid("buyerUid")
                                 .id("buyerUid")
-                                .ext(mapper.valueToTree(ExtUser.of(null, "consent", null)))
+                                .ext(mapper.valueToTree(ExtUser.builder().consent("consent").build()))
                                 .build())
-                        .regs(Regs.of(0, mapper.valueToTree(ExtRegs.of(1))))
+                        .regs(Regs.of(0, mapper.valueToTree(ExtRegs.of(1, null))))
                         .source(Source.builder()
                                 .fd(1)
                                 .tid("tid1")
@@ -335,8 +331,7 @@ public class AppnexusAdapterTest extends VertxTest {
                                         .mimes(singletonList("Mime"))
                                         .playbackMethod(1)
                                         .build()),
-                        identity()
-                )));
+                        identity())));
 
         preBidRequestContext = givenPreBidRequestContext(identity(), identity());
 
@@ -356,8 +351,7 @@ public class AppnexusAdapterTest extends VertxTest {
                                 .tagid("30011")
                                 .ext(mapper.valueToTree(AppnexusImpExt.of(
                                         AppnexusImpExtAppnexus.of(9848285, null, null, null, null))))
-                                .build()
-                );
+                                .build());
     }
 
     @Test
@@ -400,8 +394,7 @@ public class AppnexusAdapterTest extends VertxTest {
                 tuple(
                         "legacyInvCode1",
                         mapper.valueToTree(AppnexusImpExt.of(
-                                AppnexusImpExtAppnexus.of(101, null, "legacyTrafficSourceCode1", null, null)))
-                ));
+                                AppnexusImpExtAppnexus.of(101, null, "legacyTrafficSourceCode1", null, null)))));
     }
 
     @Test
@@ -441,7 +434,7 @@ public class AppnexusAdapterTest extends VertxTest {
                                         .h(250)
                                         .dealid("dealId")
                                         .ext(mapper.valueToTree(AppnexusBidExt.of(
-                                                AppnexusBidExtAppnexus.of(BANNER_TYPE))))
+                                                AppnexusBidExtAppnexus.builder().bidAdType(BANNER_TYPE).build())))
                                         .build()))
                                 .build())));
 
@@ -481,7 +474,7 @@ public class AppnexusAdapterTest extends VertxTest {
                                 .bid(singletonList(Bid.builder()
                                         .impid("adUnitCode")
                                         .ext(mapper.valueToTree(AppnexusBidExt.of(
-                                                AppnexusBidExtAppnexus.of(VIDEO_TYPE))))
+                                                AppnexusBidExtAppnexus.builder().bidAdType(VIDEO_TYPE).build())))
                                         .build()))
                                 .build())));
 
@@ -510,7 +503,7 @@ public class AppnexusAdapterTest extends VertxTest {
                                 .bid(singletonList(Bid.builder()
                                         .impid("adUnitCode")
                                         .ext(mapper.valueToTree(AppnexusBidExt.of(
-                                                AppnexusBidExtAppnexus.of(BANNER_TYPE))))
+                                                AppnexusBidExtAppnexus.builder().bidAdType(BANNER_TYPE).build())))
                                         .build()))
                                 .build())));
 
@@ -587,7 +580,7 @@ public class AppnexusAdapterTest extends VertxTest {
                                 .bid(singletonList(Bid.builder()
                                         .impid("adUnitCode")
                                         .ext(mapper.valueToTree(AppnexusBidExt.of(
-                                                AppnexusBidExtAppnexus.of(null))))
+                                                AppnexusBidExtAppnexus.builder().build())))
                                         .build()))
                                 .build())));
 
@@ -612,7 +605,7 @@ public class AppnexusAdapterTest extends VertxTest {
                                 .bid(singletonList(Bid.builder()
                                         .impid("adUnitCode")
                                         .ext(mapper.valueToTree(AppnexusBidExt.of(
-                                                AppnexusBidExtAppnexus.of(42))))
+                                                AppnexusBidExtAppnexus.builder().bidAdType(42).build())))
                                         .build()))
                                 .build())));
 
@@ -649,12 +642,16 @@ public class AppnexusAdapterTest extends VertxTest {
                                         Bid.builder()
                                                 .impid("adUnitCode1")
                                                 .ext(mapper.valueToTree(AppnexusBidExt.of(
-                                                        AppnexusBidExtAppnexus.of(BANNER_TYPE))))
+                                                        AppnexusBidExtAppnexus.builder()
+                                                                .bidAdType(BANNER_TYPE)
+                                                                .build())))
                                                 .build(),
                                         Bid.builder()
                                                 .impid("adUnitCode2")
                                                 .ext(mapper.valueToTree(AppnexusBidExt.of(
-                                                        AppnexusBidExtAppnexus.of(BANNER_TYPE))))
+                                                        AppnexusBidExtAppnexus.builder()
+                                                                .bidAdType(BANNER_TYPE)
+                                                                .build())))
                                                 .build()))
                                 .build())));
 

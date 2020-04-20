@@ -2,6 +2,7 @@ package org.prebid.server.handler;
 
 import io.netty.util.AsciiString;
 import io.vertx.core.Future;
+import io.vertx.core.http.Cookie;
 import io.vertx.core.http.HttpServerRequest;
 import io.vertx.core.http.HttpServerResponse;
 import io.vertx.ext.web.RoutingContext;
@@ -19,8 +20,12 @@ import org.prebid.server.cookie.proto.Uids;
 import org.prebid.server.optout.GoogleRecaptchaVerifier;
 
 import static java.util.Collections.emptyMap;
-import static org.assertj.core.api.Assertions.*;
-import static org.mockito.ArgumentMatchers.*;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.BDDMockito.given;
 import static org.mockito.Mockito.verify;
 
@@ -46,7 +51,6 @@ public class OptoutHandlerTest extends VertxTest {
     public void setUp() {
         given(routingContext.request()).willReturn(httpRequest);
         given(routingContext.response()).willReturn(httpResponse);
-        given(routingContext.addCookie(any())).willReturn(routingContext);
 
         given(httpRequest.getFormAttribute("g-recaptcha-response")).willReturn("recaptcha1");
 
@@ -55,30 +59,12 @@ public class OptoutHandlerTest extends VertxTest {
 
         given(googleRecaptchaVerifier.verify(anyString())).willReturn(Future.succeededFuture());
 
+        given(uidsCookieService.toCookie(any())).willReturn(Cookie.cookie("cookie", "value"));
         given(uidsCookieService.parseFromRequest(any()))
-                .willReturn(new UidsCookie(Uids.builder().uids(emptyMap()).build()));
+                .willReturn(new UidsCookie(Uids.builder().uids(emptyMap()).build(), jacksonMapper));
 
         optoutHandler = new OptoutHandler(googleRecaptchaVerifier, uidsCookieService,
                 OptoutHandler.getOptoutRedirectUrl("http://external/url"), "http://optout/url", "http://optin/url");
-    }
-
-    @Test
-    public void creationShouldFailOnNullArguments() {
-        // then
-        assertThatNullPointerException().isThrownBy(
-                () -> new OptoutHandler(null, uidsCookieService, "http://url.com", "http://url.com", "http://url.com"));
-        assertThatNullPointerException().isThrownBy(
-                () -> new OptoutHandler(googleRecaptchaVerifier, null, "http://url.com", "http://url.com",
-                        "http://url.com"));
-        assertThatNullPointerException().isThrownBy(
-                () -> new OptoutHandler(googleRecaptchaVerifier, uidsCookieService, null, "http://url.com",
-                        "http://url.com"));
-        assertThatNullPointerException().isThrownBy(
-                () -> new OptoutHandler(googleRecaptchaVerifier, uidsCookieService, "http://ext-url.com", null,
-                        "http://url.com"));
-        assertThatNullPointerException().isThrownBy(
-                () -> new OptoutHandler(googleRecaptchaVerifier, uidsCookieService, "http://url.com",
-                        "http://ext-url.com", null));
     }
 
     @Test

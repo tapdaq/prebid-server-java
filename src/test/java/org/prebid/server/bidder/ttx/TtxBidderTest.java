@@ -17,8 +17,8 @@ import org.prebid.server.bidder.model.HttpCall;
 import org.prebid.server.bidder.model.HttpRequest;
 import org.prebid.server.bidder.model.HttpResponse;
 import org.prebid.server.bidder.model.Result;
-import org.prebid.server.bidder.ttx.proto.TtxImpExtTtx;
 import org.prebid.server.bidder.ttx.proto.TtxImpExt;
+import org.prebid.server.bidder.ttx.proto.TtxImpExtTtx;
 import org.prebid.server.proto.openrtb.ext.ExtPrebid;
 import org.prebid.server.proto.openrtb.ext.request.ttx.ExtImpTtx;
 
@@ -41,12 +41,12 @@ public class TtxBidderTest extends VertxTest {
 
     @Before
     public void setUp() {
-        ttxBidder = new TtxBidder(ENDPOINT_URL);
+        ttxBidder = new TtxBidder(ENDPOINT_URL, jacksonMapper);
     }
 
     @Test
     public void creationShouldFailOnInvalidEndpointUrl() {
-        assertThatIllegalArgumentException().isThrownBy(() -> new TtxBidder("invalid_url"));
+        assertThatIllegalArgumentException().isThrownBy(() -> new TtxBidder("invalid_url", jacksonMapper));
     }
 
     @Test
@@ -104,7 +104,6 @@ public class TtxBidderTest extends VertxTest {
                 .extracting(Site::getId)
                 .containsOnly("siteId");
     }
-
 
     @Test
     public void makeHttpRequestsShouldChangeOnlyFirstImpExt() {
@@ -198,8 +197,10 @@ public class TtxBidderTest extends VertxTest {
         assertThat(ttxBidder.extractTargeting(mapper.createObjectNode())).isEqualTo(emptyMap());
     }
 
-    private static BidRequest givenBidRequest(Function<BidRequest.BidRequestBuilder, BidRequest.BidRequestBuilder> bidRequestCustomizer,
-                                              Function<Imp.ImpBuilder, Imp.ImpBuilder> impCustomizer) {
+    private static BidRequest givenBidRequest(
+            Function<BidRequest.BidRequestBuilder, BidRequest.BidRequestBuilder> bidRequestCustomizer,
+            Function<Imp.ImpBuilder, Imp.ImpBuilder> impCustomizer) {
+
         return bidRequestCustomizer.apply(BidRequest.builder()
                 .imp(singletonList(givenImp(impCustomizer))))
                 .build();

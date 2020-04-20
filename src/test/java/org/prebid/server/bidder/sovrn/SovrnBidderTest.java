@@ -14,7 +14,6 @@ import com.iab.openrtb.request.Video;
 import com.iab.openrtb.response.Bid;
 import com.iab.openrtb.response.BidResponse;
 import com.iab.openrtb.response.SeatBid;
-import io.vertx.core.json.Json;
 import org.junit.Before;
 import org.junit.Test;
 import org.prebid.server.VertxTest;
@@ -42,13 +41,13 @@ import static org.assertj.core.api.Assertions.tuple;
 
 public class SovrnBidderTest extends VertxTest {
 
-    private static final String ENDPOINT_URL = "http://sovrn.com/openrtb2d";
+    private static final String ENDPOINT_URL = "http://test/auction";
 
     private SovrnBidder sovrnBidder;
 
     @Before
     public void setUp() {
-        sovrnBidder = new SovrnBidder(ENDPOINT_URL);
+        sovrnBidder = new SovrnBidder(ENDPOINT_URL, jacksonMapper);
     }
 
     @Test
@@ -146,8 +145,8 @@ public class SovrnBidderTest extends VertxTest {
                                         .build())
                                 .ext(mapper.valueToTree(ExtPrebid.of(null, ExtImpSovrn.of("tagid", null, null))))
                                 .build()))
-                .user(User.builder().ext(Json.mapper.valueToTree(ExtUser.of(null, "consent", null))).build())
-                .regs(Regs.of(null, Json.mapper.valueToTree(ExtRegs.of(1))))
+                .user(User.builder().ext(mapper.valueToTree(ExtUser.builder().consent("consent").build())).build())
+                .regs(Regs.of(null, mapper.valueToTree(ExtRegs.of(1, null))))
                 .build();
 
         // when
@@ -169,8 +168,10 @@ public class SovrnBidderTest extends VertxTest {
                                 .tagid("tagid")
                                 .bidfloor(null)
                                 .build()))
-                        .user(User.builder().ext(Json.mapper.valueToTree(ExtUser.of(null, "consent", null))).build())
-                        .regs(Regs.of(null, Json.mapper.valueToTree(ExtRegs.of(1))))
+                        .user(User.builder()
+                                .ext(mapper.valueToTree(ExtUser.builder().consent("consent").build()))
+                                .build())
+                        .regs(Regs.of(null, mapper.valueToTree(ExtRegs.of(1, null))))
                         .build());
     }
 
@@ -286,30 +287,29 @@ public class SovrnBidderTest extends VertxTest {
                 .build());
 
         // then
-        assertThat(result.getValue())
-                .hasSize(1)
-                .element(0).returns("http://sovrn.com/openrtb2d", HttpRequest::getUri);
+        assertThat(result.getValue()).hasSize(1)
+                .element(0).returns(ENDPOINT_URL, HttpRequest::getUri);
     }
 
     @Test
     public void makeBidsShouldReturnErrorIfResponseBodyCouldNotBeParsed() {
         // given
-        final HttpCall httpCall = givenHttpCall("invalid");
+        final HttpCall<BidRequest> httpCall = givenHttpCall("invalid");
 
         // when
         final Result<List<BidderBid>> result = sovrnBidder.makeBids(httpCall, BidRequest.builder().build());
 
         // then
-        assertThat(result.getErrors()).hasSize(1).containsOnly(BidderError.badServerResponse(
-                "Failed to decode: Unrecognized token 'invalid': was expecting ('true', 'false' or 'null')\n" +
-                        " at [Source: (String)\"invalid\"; line: 1, column: 15]"));
+        assertThat(result.getErrors()).hasSize(1)
+                .allMatch(error -> error.getType() == BidderError.Type.bad_server_response
+                        && error.getMessage().startsWith("Failed to decode: Unrecognized token 'invalid'"));
         assertThat(result.getValue()).isEmpty();
     }
 
     @Test
     public void makeBidsShouldReturnResultWithExpectedFields() throws JsonProcessingException {
         // given
-        final HttpCall httpCall = givenHttpCall(mapper.writeValueAsString(BidResponse.builder()
+        final HttpCall<BidRequest> httpCall = givenHttpCall(mapper.writeValueAsString(BidResponse.builder()
                 .seatbid(singletonList(SeatBid.builder()
                         .bid(singletonList(Bid.builder()
                                 .w(200)
@@ -343,7 +343,7 @@ public class SovrnBidderTest extends VertxTest {
     @Test
     public void makeBidsShouldReturnDecodedUrlInAdmField() throws JsonProcessingException {
         // given
-        final HttpCall httpCall = givenHttpCall(mapper.writeValueAsString(BidResponse.builder()
+        final HttpCall<BidRequest> httpCall = givenHttpCall(mapper.writeValueAsString(BidResponse.builder()
                 .seatbid(singletonList(SeatBid.builder()
                         .bid(singletonList(Bid.builder()
                                 .w(200)

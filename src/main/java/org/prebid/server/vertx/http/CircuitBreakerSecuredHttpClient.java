@@ -7,15 +7,18 @@ import io.vertx.core.http.HttpMethod;
 import io.vertx.core.logging.Logger;
 import io.vertx.core.logging.LoggerFactory;
 import org.prebid.server.exception.PreBidException;
+import org.prebid.server.log.ConditionalLogger;
 import org.prebid.server.metric.Metrics;
 import org.prebid.server.vertx.CircuitBreaker;
 import org.prebid.server.vertx.http.model.HttpClientResponse;
 
 import java.net.MalformedURLException;
 import java.net.URL;
+import java.time.Clock;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 
 /**
@@ -24,6 +27,8 @@ import java.util.function.Function;
 public class CircuitBreakerSecuredHttpClient implements HttpClient {
 
     private static final Logger logger = LoggerFactory.getLogger(CircuitBreakerSecuredHttpClient.class);
+    private static final ConditionalLogger conditionalLogger = new ConditionalLogger(logger);
+    private static final int LOG_PERIOD_SECONDS = 5;
 
     private final Function<String, CircuitBreaker> circuitBreakerCreator;
     private final Map<String, CircuitBreaker> circuitBreakerByName = new ConcurrentHashMap<>();
@@ -32,9 +37,11 @@ public class CircuitBreakerSecuredHttpClient implements HttpClient {
     private final Metrics metrics;
 
     public CircuitBreakerSecuredHttpClient(Vertx vertx, HttpClient httpClient, Metrics metrics,
-                                           int openingThreshold, long openingIntervalMs, long closingIntervalMs) {
+                                           int openingThreshold, long openingIntervalMs, long closingIntervalMs,
+                                           Clock clock) {
         circuitBreakerCreator = name -> new CircuitBreaker("http-client-circuit-breaker-" + name,
-                Objects.requireNonNull(vertx), openingThreshold, openingIntervalMs, closingIntervalMs)
+                Objects.requireNonNull(vertx), openingThreshold, openingIntervalMs, closingIntervalMs,
+                Objects.requireNonNull(clock))
                 .openHandler(ignored -> circuitOpened(name))
                 .halfOpenHandler(ignored -> circuitHalfOpened(name))
                 .closeHandler(ignored -> circuitClosed(name));
@@ -46,7 +53,8 @@ public class CircuitBreakerSecuredHttpClient implements HttpClient {
     }
 
     private void circuitOpened(String name) {
-        logger.warn("Http client request to {0} is failed, circuit opened.", name);
+        conditionalLogger.warn(String.format("Http client request to %s is failed, circuit opened.", name),
+                LOG_PERIOD_SECONDS, TimeUnit.SECONDS);
         metrics.updateHttpClientCircuitBreakerMetric(true);
     }
 
@@ -63,7 +71,7 @@ public class CircuitBreakerSecuredHttpClient implements HttpClient {
     public Future<HttpClientResponse> request(HttpMethod method, String url, MultiMap headers, String body,
                                               long timeoutMs) {
         return circuitBreakerByName.computeIfAbsent(nameFrom(url), circuitBreakerCreator)
-                .execute(future -> httpClient.request(method, url, headers, body, timeoutMs).setHandler(future));
+                .execute(promise -> httpClient.request(method, url, headers, body, timeoutMs).setHandler(promise));
     }
 
     private static String nameFrom(String urlAsString) {

@@ -7,6 +7,7 @@ import org.springframework.validation.annotation.Validated;
 import javax.validation.constraints.NotBlank;
 import javax.validation.constraints.NotNull;
 import java.util.List;
+import java.util.Map;
 
 @Validated
 @Data
@@ -19,15 +20,23 @@ public class BidderConfigurationProperties {
     @NotBlank
     private String endpoint;
 
-    @NotBlank
-    private String usersyncUrl;
-
     @NotNull
     private Boolean pbsEnforcesGdpr;
+
+    @NotNull
+    private Boolean modifyingVastXmlAllowed;
 
     @NotNull
     private List<String> deprecatedNames;
 
     @NotNull
     private List<String> aliases;
+
+    @NotNull
+    private MetaInfo metaInfo;
+
+    @NotNull
+    private UsersyncConfigurationProperties usersync;
+
+    private Map<String, String> extraInfo;
 }

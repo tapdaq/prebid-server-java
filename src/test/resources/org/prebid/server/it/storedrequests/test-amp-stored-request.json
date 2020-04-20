@@ -1,0 +1,75 @@
+{
+  "id": "tid",
+  "imp": [
+    {
+      "id": "impId1",
+      "banner": {
+        "format": [
+          {
+            "w": 300,
+            "h": 600
+          }
+        ],
+        "w": 300,
+        "h": 600
+      },
+      "ext": {
+        "rubicon": {
+          "accountId": 5001,
+          "siteId": 6001,
+          "zoneId": 7001
+        },
+        "appnexus": {
+          "invCode": "abc",
+          "keywords": [
+            {
+              "key": "foo",
+              "value": [
+                "bar",
+                "baz"
+              ]
+            }
+          ],
+          "member": "103",
+          "position": "below",
+          "reserve": 1,
+          "trafficSourceCode": "trafficSource"
+        }
+      }
+    }
+  ],
+  "site": {
+    "domain": "example.com",
+    "page": "http://www.example.com"
+  },
+  "tmax": 5000,
+  "cur": [
+    "USD"
+  ],
+  "ext": {
+    "prebid": {
+      "currency": {
+        "rates": {
+          "EUR": {
+            "USD": 1.2406
+          },
+          "USD": {
+            "EUR": 0.8110
+          }
+        }
+      },
+      "targeting": {
+        "pricegranularity": "dense"
+      },
+      "cache": {
+        "bids": {}
+      },
+      "auctiontimestamp": 1000
+    }
+  },
+  "regs": {
+    "ext": {
+      "gdpr": 0
+    }
+  }
+}

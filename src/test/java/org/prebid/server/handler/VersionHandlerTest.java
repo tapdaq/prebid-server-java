@@ -15,7 +15,6 @@ import org.prebid.server.VertxTest;
 import static org.mockito.BDDMockito.given;
 import static org.mockito.Mockito.verify;
 
-
 public class VersionHandlerTest extends VertxTest {
 
     @Rule
@@ -31,7 +30,7 @@ public class VersionHandlerTest extends VertxTest {
     @Test
     public void shouldCreateRevisionWithNoSetVersionValueWhenFileWasNotFound() throws JsonProcessingException {
         // given
-        versionHandler = VersionHandler.create("not_found.json");
+        versionHandler = VersionHandler.create("not_found.json", jacksonMapper);
         given(routingContext.response()).willReturn(httpResponse);
 
         // when
@@ -44,7 +43,7 @@ public class VersionHandlerTest extends VertxTest {
     @Test
     public void handleShouldRespondWithInternalServerErrorWhenPropertyIsNotInFile() throws JsonProcessingException {
         // given
-        versionHandler = VersionHandler.create("org/prebid/server/handler/version/empty.json");
+        versionHandler = VersionHandler.create("org/prebid/server/handler/version/empty.json", jacksonMapper);
         given(routingContext.response()).willReturn(httpResponse);
 
         // when
@@ -54,11 +53,10 @@ public class VersionHandlerTest extends VertxTest {
         verify(httpResponse).end(mapper.writeValueAsString(RevisionResponse.of("not-set")));
     }
 
-
     @Test
     public void handleShouldRespondWithHashWhenPropertyIsInFile() throws JsonProcessingException {
         // given
-        versionHandler = VersionHandler.create("org/prebid/server/handler/version/version.json");
+        versionHandler = VersionHandler.create("org/prebid/server/handler/version/version.json", jacksonMapper);
         given(routingContext.response()).willReturn(httpResponse);
 
         // when

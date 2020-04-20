@@ -1,98 +1,87 @@
 package org.prebid.server.spring.config.bidder;
 
-import org.prebid.server.bidder.Adapter;
-import org.prebid.server.bidder.Bidder;
+import lombok.Data;
+import lombok.EqualsAndHashCode;
+import lombok.NoArgsConstructor;
 import org.prebid.server.bidder.BidderDeps;
-import org.prebid.server.bidder.BidderRequester;
-import org.prebid.server.bidder.HttpAdapterConnector;
-import org.prebid.server.bidder.HttpBidderRequester;
-import org.prebid.server.bidder.MetaInfo;
-import org.prebid.server.bidder.Usersyncer;
 import org.prebid.server.bidder.rubicon.RubiconAdapter;
 import org.prebid.server.bidder.rubicon.RubiconBidder;
-import org.prebid.server.bidder.rubicon.RubiconMetaInfo;
-import org.prebid.server.bidder.rubicon.RubiconUsersyncer;
+import org.prebid.server.json.JacksonMapper;
 import org.prebid.server.spring.config.bidder.model.BidderConfigurationProperties;
+import org.prebid.server.spring.config.bidder.model.UsersyncConfigurationProperties;
+import org.prebid.server.spring.config.bidder.util.BidderDepsAssembler;
+import org.prebid.server.spring.config.bidder.util.BidderInfoCreator;
+import org.prebid.server.spring.config.bidder.util.UsersyncerCreator;
 import org.prebid.server.spring.env.YamlPropertySourceFactory;
-import org.prebid.server.vertx.http.HttpClient;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.PropertySource;
+import org.springframework.validation.annotation.Validated;
 
-import java.util.List;
+import javax.validation.Valid;
+import javax.validation.constraints.NotNull;
 
 @Configuration
 @PropertySource(value = "classpath:/bidder-config/rubicon.yaml", factory = YamlPropertySourceFactory.class)
-public class RubiconConfiguration extends BidderConfiguration {
+public class RubiconConfiguration {
 
     private static final String BIDDER_NAME = "rubicon";
 
     @Autowired
+    private JacksonMapper mapper;
+
+    @Autowired
     @Qualifier("rubiconConfigurationProperties")
-    private BidderConfigurationProperties configProperties;
-
-    @Value("${adapters.rubicon.XAPI.Username}")
-    private String username;
-
-    @Value("${adapters.rubicon.XAPI.Password}")
-    private String password;
-
-    @Value("${external-url}")
-    private String externalUrl;
+    private RubiconConfigurationProperties configProperties;
 
     @Bean("rubiconConfigurationProperties")
     @ConfigurationProperties("adapters.rubicon")
-    BidderConfigurationProperties configurationProperties() {
-        return new BidderConfigurationProperties();
+    RubiconConfigurationProperties configurationProperties() {
+        return new RubiconConfigurationProperties();
     }
 
     @Bean
-    BidderDeps rubiconBidderDeps(HttpClient httpClient, HttpAdapterConnector httpAdapterConnector) {
-        return bidderDeps(httpClient, httpAdapterConnector);
+    BidderDeps rubiconBidderDeps() {
+        final UsersyncConfigurationProperties usersync = configProperties.getUsersync();
+
+        return BidderDepsAssembler.forBidder(BIDDER_NAME)
+                .withConfig(configProperties)
+                .bidderInfo(BidderInfoCreator.create(configProperties))
+                .usersyncerCreator(UsersyncerCreator.create(usersync, null))
+                .bidderCreator(() -> new RubiconBidder(configProperties.getEndpoint(),
+                        configProperties.getXapi().getUsername(), configProperties.getXapi().getPassword(),
+                        configProperties.getMetaInfo().getSupportedVendors(), configProperties.getGenerateBidId(),
+                        mapper))
+                .adapterCreator(() -> new RubiconAdapter(usersync.getCookieFamilyName(), configProperties.getEndpoint(),
+                        configProperties.getXapi().getUsername(), configProperties.getXapi().getPassword(), mapper))
+                .assemble();
     }
 
-    @Override
-    public String bidderName() {
-        return BIDDER_NAME;
+    @Validated
+    @Data
+    @EqualsAndHashCode(callSuper = true)
+    @NoArgsConstructor
+    private static class RubiconConfigurationProperties extends BidderConfigurationProperties {
+
+        @Valid
+        @NotNull
+        private XAPI xapi = new XAPI();
+
+        @NotNull
+        private Boolean generateBidId;
     }
 
-    @Override
-    protected List<String> deprecatedNames() {
-        return configProperties.getDeprecatedNames();
-    }
+    @Data
+    @NoArgsConstructor
+    private static class XAPI {
 
-    @Override
-    protected List<String> aliases() {
-        return configProperties.getAliases();
-    }
+        @NotNull
+        private String username;
 
-    @Override
-    public MetaInfo createMetaInfo() {
-        return new RubiconMetaInfo(configProperties.getEnabled(), configProperties.getPbsEnforcesGdpr());
-    }
-
-    @Override
-    public Usersyncer createUsersyncer() {
-        return new RubiconUsersyncer(configProperties.getUsersyncUrl());
-    }
-
-    @Override
-    protected Bidder<?> createBidder(MetaInfo metaInfo) {
-        return new RubiconBidder(configProperties.getEndpoint(), username, password, metaInfo);
-    }
-
-    @Override
-    public Adapter createAdapter(Usersyncer usersyncer) {
-        return new RubiconAdapter(usersyncer, configProperties.getEndpoint(), username, password);
-    }
-
-    @Override
-    protected BidderRequester createBidderRequester(HttpClient httpClient, Bidder<?> bidder, Adapter<?, ?> adapter,
-                                                    Usersyncer usersyncer, HttpAdapterConnector httpAdapterConnector) {
-        return new HttpBidderRequester<>(bidder, httpClient);
+        @NotNull
+        private String password;
     }
 }

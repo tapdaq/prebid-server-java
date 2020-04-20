@@ -1,0 +1,22 @@
+adapters:
+  rubicon:
+    enabled: true
+    XAPI.Username: user1
+    XAPI.Password: password1
+metrics:
+  prefix: prebid
+cache:
+  scheme: http
+  host: localhost
+  path: /cache
+  query: uuid=
+settings:
+  filesystem:
+    settings-filename: sample/sample-app-settings.yaml
+    stored-requests-dir: /var/tmp
+    stored-imps-dir: /var/tmp
+    stored-responses-dir: /var/tmp
+gdpr:
+  vendorlist:
+    filesystem-cache-dir: /var/tmp
+status-response: "ok"

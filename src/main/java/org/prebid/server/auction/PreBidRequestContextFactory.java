@@ -5,13 +5,10 @@ import io.vertx.core.CompositeFuture;
 import io.vertx.core.Future;
 import io.vertx.core.buffer.Buffer;
 import io.vertx.core.http.HttpServerRequest;
-import io.vertx.core.json.DecodeException;
-import io.vertx.core.json.Json;
 import io.vertx.core.logging.Logger;
 import io.vertx.core.logging.LoggerFactory;
 import io.vertx.ext.web.RoutingContext;
 import org.apache.commons.collections4.CollectionUtils;
-import org.apache.commons.lang3.ObjectUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.prebid.server.auction.model.AdUnitBid;
 import org.prebid.server.auction.model.AdapterRequest;
@@ -21,6 +18,8 @@ import org.prebid.server.cookie.UidsCookieService;
 import org.prebid.server.exception.PreBidException;
 import org.prebid.server.execution.Timeout;
 import org.prebid.server.execution.TimeoutFactory;
+import org.prebid.server.json.DecodeException;
+import org.prebid.server.json.JacksonMapper;
 import org.prebid.server.proto.request.AdUnit;
 import org.prebid.server.proto.request.Bid;
 import org.prebid.server.proto.request.PreBidRequest;
@@ -37,37 +36,38 @@ import java.util.function.Function;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
+/**
+ * Used in legacy request processing.
+ */
 public class PreBidRequestContextFactory {
 
     private static final Logger logger = LoggerFactory.getLogger(PreBidRequestContextFactory.class);
 
-    private final long defaultHttpRequestTimeout;
-    private final long maxHttpRequestTimeout;
+    private static final TypeReference<List<Bid>> LIST_OF_BIDS_TYPE_REFERENCE = new TypeReference<List<Bid>>() {
+    };
 
+    private final TimeoutResolver timeoutResolver;
     private final ImplicitParametersExtractor paramsExtractor;
     private final ApplicationSettings applicationSettings;
     private final UidsCookieService uidsCookieService;
     private final TimeoutFactory timeoutFactory;
+    private final JacksonMapper mapper;
 
     private final Random rand = new Random();
 
-    public PreBidRequestContextFactory(long defaultHttpRequestTimeout, long maxHttpRequestTimeout,
+    public PreBidRequestContextFactory(TimeoutResolver timeoutResolver,
                                        ImplicitParametersExtractor paramsExtractor,
-                                       ApplicationSettings applicationSettings, UidsCookieService uidsCookieService,
-                                       TimeoutFactory timeoutFactory) {
+                                       ApplicationSettings applicationSettings,
+                                       UidsCookieService uidsCookieService,
+                                       TimeoutFactory timeoutFactory,
+                                       JacksonMapper mapper) {
 
-        if (maxHttpRequestTimeout < defaultHttpRequestTimeout) {
-            throw new IllegalArgumentException(
-                    String.format("Max timeout cannot be less than default timeout: max=%d, default=%d",
-                            maxHttpRequestTimeout, defaultHttpRequestTimeout));
-        }
-
-        this.defaultHttpRequestTimeout = defaultHttpRequestTimeout;
-        this.maxHttpRequestTimeout = maxHttpRequestTimeout;
+        this.timeoutResolver = Objects.requireNonNull(timeoutResolver);
         this.paramsExtractor = Objects.requireNonNull(paramsExtractor);
         this.applicationSettings = Objects.requireNonNull(applicationSettings);
         this.uidsCookieService = Objects.requireNonNull(uidsCookieService);
         this.timeoutFactory = Objects.requireNonNull(timeoutFactory);
+        this.mapper = Objects.requireNonNull(mapper);
     }
 
     /**
@@ -83,7 +83,7 @@ public class PreBidRequestContextFactory {
 
         final PreBidRequest preBidRequest;
         try {
-            preBidRequest = Json.decodeValue(body, PreBidRequest.class);
+            preBidRequest = mapper.decodeValue(body, PreBidRequest.class);
         } catch (DecodeException e) {
             return Future.failedFuture(new PreBidException(e.getMessage(), e.getCause()));
         }
@@ -161,17 +161,30 @@ public class PreBidRequestContextFactory {
         final String configId = unit.getConfigId();
         if (StringUtils.isNotBlank(configId)) {
             result = applicationSettings.getAdUnitConfigById(configId, timeout)
-                    .map(config -> Json.decodeValue(config, new TypeReference<List<Bid>>() {
-                    }))
-                    .otherwise(exception -> {
-                        logger.warn("Failed to load config ''{0}'' from cache", exception, configId);
-                        return Collections.emptyList();
-                    });
+                    .map(config -> toBids(config, configId))
+                    .otherwise(exception -> fallbackResult(exception, configId));
         } else {
             result = Future.succeededFuture(unit.getBids());
         }
 
         return result;
+    }
+
+    private List<Bid> fallbackResult(Throwable exception, String configId) {
+        if (exception instanceof PreBidException) {
+            logger.warn("AdUnit config not found by id ''{0}'' from cache", configId);
+        } else {
+            logger.warn("Failed to load config ''{0}'' from cache", exception, configId);
+        }
+        return Collections.emptyList();
+    }
+
+    private List<Bid> toBids(String config, String configId) {
+        try {
+            return mapper.decodeValue(config, LIST_OF_BIDS_TYPE_REFERENCE);
+        } catch (DecodeException e) {
+            throw new PreBidException(String.format("Cannot parse AdUnit config for id: %s", configId), e);
+        }
     }
 
     private AdUnitBid toAdUnitBid(AdUnit unit, Bid bid) {
@@ -189,33 +202,35 @@ public class PreBidRequestContextFactory {
     }
 
     private Set<MediaType> makeBidMediaTypes(List<String> mediaTypes) {
-        final Set<MediaType> bidMediaTypes;
+        final Set<MediaType> result;
+
         if (mediaTypes != null && !mediaTypes.isEmpty()) {
-            bidMediaTypes = new HashSet<>();
+            result = new HashSet<>();
             for (String mediaType : mediaTypes) {
                 try {
-                    bidMediaTypes.add(MediaType.valueOf(mediaType.toLowerCase()));
+                    result.add(MediaType.valueOf(mediaType.toLowerCase()));
                 } catch (IllegalArgumentException e) {
                     logger.warn("Invalid mediaType: {0}", mediaType);
                 }
             }
-            if (bidMediaTypes.isEmpty()) {
-                bidMediaTypes.add(MediaType.banner);
+            if (result.isEmpty()) {
+                result.add(MediaType.banner);
             }
         } else {
-            bidMediaTypes = Collections.singleton(MediaType.banner);
+            result = Collections.singleton(MediaType.banner);
         }
-        return bidMediaTypes;
+
+        return result;
     }
 
     private PreBidRequest adjustRequestTimeout(PreBidRequest preBidRequest) {
-        final long timeout = ObjectUtils.firstNonNull(preBidRequest.getTimeoutMillis(), 0L);
+        final Long requestTimeout = preBidRequest.getTimeoutMillis();
+        final long resolvedTimeout = timeoutResolver.resolve(requestTimeout);
+        final long timeout = timeoutResolver.adjustTimeout(resolvedTimeout);
 
-        final long adjustedTimeout = timeout <= 0 ? defaultHttpRequestTimeout
-                : timeout > maxHttpRequestTimeout ? maxHttpRequestTimeout : timeout;
-
-        return adjustedTimeout != timeout
-                ? preBidRequest.toBuilder().timeoutMillis(adjustedTimeout).build()
+        // check, do we really need to update request?
+        return !Objects.equals(requestTimeout, timeout)
+                ? preBidRequest.toBuilder().timeoutMillis(timeout).build()
                 : preBidRequest;
     }
 

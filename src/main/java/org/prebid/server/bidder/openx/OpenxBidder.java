@@ -1,6 +1,7 @@
 package org.prebid.server.bidder.openx;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.iab.openrtb.request.BidRequest;
 import com.iab.openrtb.request.Imp;
@@ -8,11 +9,8 @@ import com.iab.openrtb.response.Bid;
 import com.iab.openrtb.response.BidResponse;
 import com.iab.openrtb.response.SeatBid;
 import io.vertx.core.http.HttpMethod;
-import io.vertx.core.json.DecodeException;
-import io.vertx.core.json.Json;
 import org.apache.commons.collections4.CollectionUtils;
 import org.prebid.server.bidder.Bidder;
-import org.prebid.server.bidder.BidderUtil;
 import org.prebid.server.bidder.model.BidderBid;
 import org.prebid.server.bidder.model.BidderError;
 import org.prebid.server.bidder.model.HttpCall;
@@ -22,6 +20,8 @@ import org.prebid.server.bidder.openx.model.OpenxImpType;
 import org.prebid.server.bidder.openx.proto.OpenxImpExt;
 import org.prebid.server.bidder.openx.proto.OpenxRequestExt;
 import org.prebid.server.exception.PreBidException;
+import org.prebid.server.json.DecodeException;
+import org.prebid.server.json.JacksonMapper;
 import org.prebid.server.proto.openrtb.ext.ExtPrebid;
 import org.prebid.server.proto.openrtb.ext.request.openx.ExtImpOpenx;
 import org.prebid.server.proto.openrtb.ext.response.BidType;
@@ -35,7 +35,6 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.stream.Collectors;
 
-
 /**
  * OpenX {@link Bidder} implementation.
  */
@@ -48,9 +47,11 @@ public class OpenxBidder implements Bidder<BidRequest> {
             };
 
     private final String endpointUrl;
+    private final JacksonMapper mapper;
 
-    public OpenxBidder(String endpointUrl) {
+    public OpenxBidder(String endpointUrl, JacksonMapper mapper) {
         this.endpointUrl = HttpUtil.validateUrl(Objects.requireNonNull(endpointUrl));
+        this.mapper = Objects.requireNonNull(mapper);
     }
 
     @Override
@@ -69,9 +70,9 @@ public class OpenxBidder implements Bidder<BidRequest> {
     }
 
     @Override
-    public Result<List<BidderBid>> makeBids(HttpCall httpCall, BidRequest bidRequest) {
+    public Result<List<BidderBid>> makeBids(HttpCall<BidRequest> httpCall, BidRequest bidRequest) {
         try {
-            final BidResponse bidResponse = Json.decodeValue(httpCall.getResponse().getBody(), BidResponse.class);
+            final BidResponse bidResponse = mapper.decodeValue(httpCall.getResponse().getBody(), BidResponse.class);
             return Result.of(extractBids(bidRequest, bidResponse), Collections.emptyList());
         } catch (DecodeException e) {
             return Result.emptyWithError(BidderError.badServerResponse(e.getMessage()));
@@ -127,7 +128,7 @@ public class OpenxBidder implements Bidder<BidRequest> {
         return bidRequests.stream()
                 .filter(Objects::nonNull)
                 .map(singleBidRequest -> HttpRequest.<BidRequest>builder().method(HttpMethod.POST).uri(endpointUrl)
-                        .body(Json.encode(singleBidRequest)).headers(BidderUtil.headers()).payload(singleBidRequest)
+                        .body(mapper.encode(singleBidRequest)).headers(HttpUtil.headers()).payload(singleBidRequest)
                         .build())
                 .collect(Collectors.toList());
     }
@@ -159,7 +160,7 @@ public class OpenxBidder implements Bidder<BidRequest> {
     }
 
     private ObjectNode makeReqExt(List<Imp> imps) {
-        return Json.mapper.valueToTree(OpenxRequestExt.of(parseOpenxExt(imps.get(0)).getDelDomain(), OPENX_CONFIG));
+        return mapper.mapper().valueToTree(OpenxRequestExt.of(parseOpenxExt(imps.get(0)).getDelDomain(), OPENX_CONFIG));
     }
 
     private ExtImpOpenx parseOpenxExt(Imp imp) {
@@ -170,7 +171,7 @@ public class OpenxBidder implements Bidder<BidRequest> {
         }
 
         try {
-            impExtPrebid = Json.mapper.convertValue(impExt, OPENX_EXT_TYPE_REFERENCE);
+            impExtPrebid = mapper.mapper().convertValue(impExt, OPENX_EXT_TYPE_REFERENCE);
         } catch (IllegalArgumentException e) {
             throw new PreBidException(e.getMessage());
         }
@@ -182,9 +183,9 @@ public class OpenxBidder implements Bidder<BidRequest> {
         return impExtOpenx;
     }
 
-    private ObjectNode makeImpExt(Map<String, String> customParams) {
+    private ObjectNode makeImpExt(Map<String, JsonNode> customParams) {
         return customParams != null
-                ? Json.mapper.valueToTree(OpenxImpExt.of(customParams))
+                ? mapper.mapper().valueToTree(OpenxImpExt.of(customParams))
                 : null;
     }
 

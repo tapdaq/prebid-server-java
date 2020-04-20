@@ -12,17 +12,16 @@ import com.iab.openrtb.response.BidResponse;
 import com.iab.openrtb.response.SeatBid;
 import io.vertx.core.MultiMap;
 import io.vertx.core.http.HttpMethod;
-import io.vertx.core.json.DecodeException;
-import io.vertx.core.json.Json;
 import org.apache.commons.collections4.CollectionUtils;
 import org.prebid.server.bidder.Bidder;
-import org.prebid.server.bidder.BidderUtil;
 import org.prebid.server.bidder.model.BidderBid;
 import org.prebid.server.bidder.model.BidderError;
 import org.prebid.server.bidder.model.HttpCall;
 import org.prebid.server.bidder.model.HttpRequest;
 import org.prebid.server.bidder.model.Result;
 import org.prebid.server.exception.PreBidException;
+import org.prebid.server.json.DecodeException;
+import org.prebid.server.json.JacksonMapper;
 import org.prebid.server.proto.openrtb.ext.ExtPrebid;
 import org.prebid.server.proto.openrtb.ext.request.adkerneladn.ExtImpAdkernelAdn;
 import org.prebid.server.proto.openrtb.ext.response.BidType;
@@ -39,6 +38,9 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.stream.Collectors;
 
+/**
+ * AdkernelAdn {@link Bidder} implementation.
+ */
 public class AdkernelAdnBidder implements Bidder<BidRequest> {
 
     private static final TypeReference<ExtPrebid<?, ExtImpAdkernelAdn>> ADKERNELADN_EXT_TYPE_REFERENCE =
@@ -48,9 +50,11 @@ public class AdkernelAdnBidder implements Bidder<BidRequest> {
     private static final String DEFAULT_BID_CURRENCY = "USD";
 
     private final String endpointUrl;
+    private final JacksonMapper mapper;
 
-    public AdkernelAdnBidder(String endpointUrl) {
+    public AdkernelAdnBidder(String endpointUrl, JacksonMapper mapper) {
         this.endpointUrl = HttpUtil.validateUrl(Objects.requireNonNull(endpointUrl));
+        this.mapper = Objects.requireNonNull(mapper);
     }
 
     @Override
@@ -71,21 +75,29 @@ public class AdkernelAdnBidder implements Bidder<BidRequest> {
     }
 
     private static MultiMap headers() {
-        return BidderUtil.headers()
+        return HttpUtil.headers()
                 .add("x-openrtb-version", "2.5");
     }
 
-    private static List<ExtImpAdkernelAdn> getAndValidateImpExt(List<Imp> imps) {
+    private List<ExtImpAdkernelAdn> getAndValidateImpExt(List<Imp> imps) {
         return imps.stream()
-                .map(AdkernelAdnBidder::parseAndValidateAdkernelAdnExt)
+                .map(AdkernelAdnBidder::validateImp)
+                .map(this::parseAndValidateAdkernelAdnExt)
                 .collect(Collectors.toList());
     }
 
-    private static ExtImpAdkernelAdn parseAndValidateAdkernelAdnExt(Imp imp) {
+    private static Imp validateImp(Imp imp) {
+        if (imp.getBanner() == null && imp.getVideo() == null) {
+            throw new PreBidException(String.format("Invalid imp with id=%s. Expected imp.banner or imp.video",
+                    imp.getId()));
+        }
+        return imp;
+    }
+
+    private ExtImpAdkernelAdn parseAndValidateAdkernelAdnExt(Imp imp) {
         final ExtImpAdkernelAdn adkernelAdnExt;
         try {
-            adkernelAdnExt = Json.mapper.<ExtPrebid<?, ExtImpAdkernelAdn>>convertValue(imp.getExt(),
-                    ADKERNELADN_EXT_TYPE_REFERENCE).getBidder();
+            adkernelAdnExt = mapper.mapper().convertValue(imp.getExt(), ADKERNELADN_EXT_TYPE_REFERENCE).getBidder();
         } catch (IllegalArgumentException e) {
             throw new PreBidException(e.getMessage(), e);
         }
@@ -96,7 +108,9 @@ public class AdkernelAdnBidder implements Bidder<BidRequest> {
         return adkernelAdnExt;
     }
 
-    // Group impressions by AdKernel-specific parameters `pubId` & `host`.
+    /**
+     * Group impressions by AdKernel-specific parameters `pubId` & `host`.
+     */
     private static Map<ExtImpAdkernelAdn, List<Imp>> dispatchImpressions(List<Imp> imps,
                                                                          List<ExtImpAdkernelAdn> impExts) {
         final Map<ExtImpAdkernelAdn, List<Imp>> result = new HashMap<>();
@@ -110,15 +124,25 @@ public class AdkernelAdnBidder implements Bidder<BidRequest> {
         return result;
     }
 
-    // Alter impression info to comply with adkernel platform requirements.
+    /**
+     * Alter impression info to comply with adkernel platform requirements.
+     */
     private static Imp compatImpression(Imp imp) {
         final Imp.ImpBuilder impBuilder = imp.toBuilder();
-        final Banner compatBanner = imp.getBanner();
-
         impBuilder.ext(null); // do not forward ext to adkernel platform
 
-        if (compatBanner != null && compatBanner.getW() == null && compatBanner.getH() == null) {
-            //As banner.w/h are required fields for adkernel adn platform - take the first format entry
+        final Banner banner = imp.getBanner();
+        if (banner != null) {
+            return compatBannerImpression(impBuilder, banner);
+        }
+        return impBuilder.audio(null)
+                .xNative(null)
+                .build();
+    }
+
+    private static Imp compatBannerImpression(Imp.ImpBuilder impBuilder, Banner compatBanner) {
+        if (compatBanner.getW() == null && compatBanner.getH() == null) {
+            // As banner.w/h are required fields for adkernel adn platform - take the first format entry
             final List<Format> compatBannerFormat = compatBanner.getFormat();
 
             if (CollectionUtils.isEmpty(compatBannerFormat)) {
@@ -140,17 +164,20 @@ public class AdkernelAdnBidder implements Bidder<BidRequest> {
             impBuilder.banner(bannerBuilder.build());
         }
 
-        return impBuilder.build();
+        return impBuilder.video(null)
+                .audio(null)
+                .xNative(null)
+                .build();
     }
 
-    private static List<HttpRequest<BidRequest>> buildAdapterRequests(BidRequest preBidRequest,
-                                                                      Map<ExtImpAdkernelAdn, List<Imp>> pubToImps,
-                                                                      String endpointUrl) {
+    private List<HttpRequest<BidRequest>> buildAdapterRequests(BidRequest preBidRequest,
+                                                               Map<ExtImpAdkernelAdn, List<Imp>> pubToImps,
+                                                               String endpointUrl) {
         final List<HttpRequest<BidRequest>> result = new ArrayList<>();
 
         for (Map.Entry<ExtImpAdkernelAdn, List<Imp>> entry : pubToImps.entrySet()) {
             final BidRequest outgoingRequest = createBidRequest(preBidRequest, entry.getValue());
-            final String body = Json.encode(outgoingRequest);
+            final String body = mapper.encode(outgoingRequest);
             result.add(HttpRequest.<BidRequest>builder()
                     .method(HttpMethod.POST)
                     .uri(buildEndpoint(entry.getKey(), endpointUrl))
@@ -164,17 +191,8 @@ public class AdkernelAdnBidder implements Bidder<BidRequest> {
     }
 
     private static BidRequest createBidRequest(BidRequest preBidRequest, List<Imp> imps) {
-        final BidRequest.BidRequestBuilder bidRequestBuilder = preBidRequest.toBuilder();
-
-        final List<Imp> modifiedImps = new ArrayList<>();
-        for (Imp imp : imps) {
-            final Imp modifiedImp = imp.toBuilder()
-                    .tagid(imp.getId())
-                    .build();
-
-            modifiedImps.add(modifiedImp);
-        }
-        bidRequestBuilder.imp(modifiedImps);
+        final BidRequest.BidRequestBuilder bidRequestBuilder = preBidRequest.toBuilder()
+                .imp(imps);
 
         final Site site = preBidRequest.getSite();
         if (site != null) {
@@ -188,7 +206,9 @@ public class AdkernelAdnBidder implements Bidder<BidRequest> {
         return bidRequestBuilder.build();
     }
 
-    // Builds endpoint url based on adapter-specific pub settings from imp.ext
+    /**
+     * Builds endpoint url based on adapter-specific pub settings from imp.ext.
+     */
     private static String buildEndpoint(ExtImpAdkernelAdn impExt, String endpointUrl) {
         final String updatedEndpointUrl;
 
@@ -212,7 +232,7 @@ public class AdkernelAdnBidder implements Bidder<BidRequest> {
     @Override
     public Result<List<BidderBid>> makeBids(HttpCall<BidRequest> httpCall, BidRequest bidRequest) {
         try {
-            final BidResponse bidResponse = Json.decodeValue(httpCall.getResponse().getBody(), BidResponse.class);
+            final BidResponse bidResponse = mapper.decodeValue(httpCall.getResponse().getBody(), BidResponse.class);
             return Result.of(extractBids(httpCall.getRequest().getPayload(), bidResponse), Collections.emptyList());
         } catch (DecodeException | PreBidException e) {
             return Result.emptyWithError(BidderError.badServerResponse(e.getMessage()));
@@ -237,14 +257,16 @@ public class AdkernelAdnBidder implements Bidder<BidRequest> {
                 .collect(Collectors.toList());
     }
 
-    // Figures out which media type this bid is for.
+    /**
+     * Figures out which media type this bid is for.
+     */
     private static BidType getType(String impId, List<Imp> imps) {
         for (Imp imp : imps) {
-            if (imp.getId().equals(impId) && imp.getVideo() != null) {
-                return BidType.video;
+            if (imp.getId().equals(impId) && imp.getBanner() != null) {
+                return BidType.banner;
             }
         }
-        return BidType.banner;
+        return BidType.video;
     }
 
     @Override

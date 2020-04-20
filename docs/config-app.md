@@ -1,3 +1,4 @@
+
 # Full list of application configuration options
 
 This document describes all configuration properties available for Prebid Server.
@@ -17,38 +18,72 @@ This parameter affects how many CPU cores will be utilized by the application. R
 
 ## HTTP
 - `http.port` - the port to listen on.
-- `http.ssl` - enable SSL/TLS
-- `http.jks-path` - path to the java keystore (if ssl is enabled)
-- `http.jks-password` - password for the keystore (if ssl is enabled)
+- `http.max-headers-size` - set the maximum length of all headers.
+- `http.ssl` - enable SSL/TLS support.
+- `http.jks-path` - path to the java keystore (if ssl is enabled).
+- `http.jks-password` - password for the keystore (if ssl is enabled).
 
 ## HTTP Client
 - `http-client.max-pool-size` - set the maximum pool size for outgoing connections.
 - `http-client.connect-timeout-ms` - set the connect timeout.
 - `http-client.circuit-breaker.enabled` - if equals to `true` circuit breaker will be used to make http client more robust.
-- `http-client.circuit-breaker.opening-threshold` - the number of failure before opening the circuit.
+- `http-client.circuit-breaker.opening-threshold` - the number of failures before opening the circuit.
 - `http-client.circuit-breaker.opening-interval-ms` - time interval for opening the circuit breaker if failures count reached.
 - `http-client.circuit-breaker.closing-interval-ms` - time spent in open state before attempting to re-try.
+- `http-client.use-compression` - if equals to `true` httpclient compression is enabled for requests (see [also](https://vertx.io/docs/apidocs/io/vertx/core/http/HttpClientOptions.html#setTryUseCompression-boolean-))
+- `http-client.max-redirects` - set the maximum amount of HTTP redirections to follow. A value of 0 (the default) prevents redirections from being followed.
+- `http-client.ssl` - enable SSL/TLS support.
+- `http-client.jks-path` - path to the java keystore (if ssl is enabled).
+- `http-client.jks-password` - password for the keystore (if ssl is enabled).
 
-## Auction
+## Remote-file-syncer
+Remote File Syncer can be related to particular entity like geolocation maxmind service etc.
+Removes and downloads file again if depending service cant process probably corrupted file in the first start.
+
+- `<SERVICE>.remote-file-syncer.download-url` - url to database file to download.
+- `<SERVICE>.remote-file-syncer.save-filepath` - full path to the usable file, which will be consumed by internal service.
+- `<SERVICE>.remote-file-syncer.tmp-filepath` - full path to the temporary file.
+- `<SERVICE>.remote-file-syncer.retry-count` - how many times try to download.
+- `<SERVICE>.remote-file-syncer.retry-interval-ms` - how long to wait between failed retries.
+- `<SERVICE>.remote-file-syncer.timeout-ms` - default operation timeout for obtaining database file.
+- `<SERVICE>.remote-file-syncer.update-interval-ms` - time interval between updates of the usable file.
+- `<SERVICE>.remote-file-syncer.http-client.connect-timeout-ms` - set the connect timeout.
+- `<SERVICE>.remote-file-syncer.http-client.max-redirects` - set the maximum amount of HTTP redirections to follow. A value of 0 (the default) prevents redirections from being followed.
+
+## Auction (OpenRTB)
+- `auction.blacklisted-accounts` - comma separated list of blacklisted account IDs.
+- `auction.blacklisted-apps` - comma separated list of blacklisted applications IDs, requests from which should not be processed.
 - `auction.default-timeout-ms` - default operation timeout for OpenRTB Auction requests.
 - `auction.max-timeout-ms` - maximum operation timeout for OpenRTB Auction requests.
+- `auction.timeout-adjustment-ms` - reduces timeout value passed in Auction request so that Prebid Server can handle timeouts from adapters and respond to the request before it times out.
 - `auction.max-request-size` - set the maximum size in bytes of OpenRTB Auction request.
 - `auction.stored-requests-timeout-ms` - timeout for stored requests fetching.
 - `auction.ad-server-currency` - default currency for auction, if its value was not specified in request. Important note: PBS uses ISO-4217 codes for the representation of currencies.
-- `auction.currency-rates-refresh-period-ms` - default refresh period for currency rates updates.
-- `auction.currency-rates-url` - the url for Prebid.org’s currency file. [More details](http://prebid.org/dev-docs/modules/currency.html)
 - `auction.cache.expected-request-time-ms` - approximate value in milliseconds for Cache Service interacting. This time will be subtracted from global timeout.
+- `auction.cache.only-winning-bids` - if equals to `true` only the winning bids would be cached. Has lower priority than request-specific flags.
 
-## Amp
+## Amp (OpenRTB)
 - `amp.default-timeout-ms` - default operation timeout for OpenRTB Amp requests.
+- `amp.max-timeout-ms` - maximum operation timeout for OpenRTB Amp requests.
 - `amp.timeout-adjustment-ms` - reduces timeout value passed in Amp request so that Prebid Server can handle timeouts from adapters and respond to the AMP RTC request before it times out.
 - `amp.custom-targeting` - a list of bidders whose custom targeting should be included in AMP responses.
+
+## Video
+- `auction.video.stored-required` - flag forces to merge with stored request
+- `auction.blacklisted-accounts` - comma separated list of blacklisted account IDs.
+- `video.stored-requests-timeout-ms` - timeout for stored requests fetching.
+- `auction.ad-server-currency` - default currency for video auction, if its value was not specified in request. Important note: PBS uses ISO-4217 codes for the representation of currencies.
 
 ## Setuid
 - `setuid.default-timeout-ms` - default operation timeout for requests to `/setuid` endpoint.
 
 ## Cookie Sync
 - `cookie-sync.default-timeout-ms` - default operation timeout for requests to `/cookie_sync` endpoint.
+- `cookie-sync.coop-sync.default` - default value for coopSync when it missing in requests to `/cookie_sync` endpoint.
+- `cookie-sync.coop-sync.pri` - lists of bidders prioritised in groups.
+
+## Vtrack
+- `vtrack.allow-unkonwn-bidder` - flag allows servicing requests with bidders who were not configured in Prebid Server.
 
 ## Adapters
 - `adapters.*` - the section for bidder specific configuration options.
@@ -56,12 +91,25 @@ This parameter affects how many CPU cores will be utilized by the application. R
 There are several typical keys:
 - `adapters.<BIDDER_NAME>.enabled` - indicates the bidder should be active and ready for auction. By default all bidders are disabled.
 - `adapters.<BIDDER_NAME>.endpoint` - the url for submitting bids.
-- `adapters.<BIDDER_NAME>.usersync-url` - the url for synchronizing UIDs cookie.
 - `adapters.<BIDDER_NAME>.pbs-enforces-gdpr` - indicates if pbs server provides gdpr support for bidder or bidder will handle it itself.
 - `adapters.<BIDDER_NAME>.deprecated-names` - comma separated deprecated names of bidder.
 - `adapters.<BIDDER_NAME>.aliases` - comma separated aliases of bidder.
+- `adapters.<BIDDER_NAME>.usersync.url` - the url for synchronizing UIDs cookie.
+- `adapters.<BIDDER_NAME>.usersync.redirect-url` - the redirect part of url for synchronizing UIDs cookie.
+- `adapters.<BIDDER_NAME>.usersync.cookie-family-name` - the family name by which user ids within adapter's realm are stored in uidsCookie.
+- `adapters.<BIDDER_NAME>.usersync.type` - usersync type (i.e. redirect, iframe).
+- `adapters.<BIDDER_NAME>.usersync.support-cors` - flag signals if CORS supported by usersync.
 
 But feel free to add additional bidder's specific options.
+
+## Admin
+- `logger-level-modifier.enabled` - enable the `/admin` endpoint.
+
+## Currency Converter
+- `currency-converter.external-rates.enabled` - if equals to `true` the currency conversion service will be enabled to fetch updated rates and convert bid currencies from external source. Also enables `/currency-rates` endpoint on admin port.
+- `currency-converter.external-rates.url` - the url for Prebid.org’s currency file. [More details](http://prebid.org/dev-docs/modules/currency.html)
+- `currency-converter.external-rates.default-timeout-ms` - default operation timeout for fetching currency rates.
+- `currency-converter.external-rates.refresh-period-ms` - default refresh period for currency rates updates.
 
 ## Metrics
 - `metrics.metricType` - set the type of metric counter for [Dropwizard Metrics](http://metrics.dropwizard.io). Can be `flushingCounter` (default), `counter` or `meter`.
@@ -87,6 +135,7 @@ For `influxdb` backend type available next options:
 - `metrics.influxdb.connectTimeout` - the connect timeout.
 - `metrics.influxdb.readTimeout` - the response timeout.
 - `metrics.influxdb.interval` - interval in seconds between successive sending metrics.
+- `metrics.influxdb.tags` - the influxDb tags, optional key-value metrics metadata.
 
 For `console` backend type available next options:
 - `metrics.console.enabled` - if equals to `true` then `console` will be used to submit metrics.
@@ -101,7 +150,7 @@ See [metrics documentation](metrics.md) for complete list of metrics submitted a
 ## Cache
 - `cache.scheme` - set the external Cache Service protocol: `http`, `https`, etc.
 - `cache.host` - set the external Cache Service destination in format `host:port`.
-- `cache.path` - set the external Cache Service path, for example `/cache`
+- `cache.path` - set the external Cache Service path, for example `/cache`.
 - `cache.query` - appends to the cache path as query string params (used for legacy Auction requests).
 - `cache.banner-ttl-seconds` - how long (in seconds) banner will be available via the external Cache Service.
 - `cache.video-ttl-seconds` - how long (in seconds) video creative will be available via the external Cache Service.
@@ -133,24 +182,39 @@ For database data source available next options:
 - `settings.database.pool-size` - set the initial/min/max pool size of database connections.
 - `settings.database.stored-requests-query` - the SQL query to fetch stored requests.
 - `settings.database.amp-stored-requests-query` - the SQL query to fetch AMP stored requests.
+- `settings.database.stored-responses-query` - the SQL query to fetch stored responses.
 - `settings.database.circuit-breaker.enabled` - if equals to `true` circuit breaker will be used to make database client more robust.
-- `settings.database.circuit-breaker.opening-threshold` - the number of failure before opening the circuit.
+- `settings.database.circuit-breaker.opening-threshold` - the number of failures before opening the circuit.
 - `settings.database.circuit-breaker.opening-interval-ms` - time interval for opening the circuit breaker if failures count reached.
 - `settings.database.circuit-breaker.closing-interval-ms` - time spent in open state before attempting to re-try.
 
 For HTTP data source available next options:
 - `settings.http.endpoint` - the url to fetch stored requests.
 - `settings.http.amp-endpoint` - the url to fetch AMP stored requests.
+- `settings.http.video-endpoint` - the url to fetch video stored requests.
+
+For account processing rules available next options:
+- `settings.enforce-valid-account` - if equals to `true` then request without account id will be rejected with 401.
 
 For caching available next options:
 - `settings.in-memory-cache.ttl-seconds` - how long (in seconds) data will be available in LRU cache.
 - `settings.in-memory-cache.cache-size` - the size of LRU cache.
 - `settings.in-memory-cache.notification-endpoints-enabled` - if equals to `true` two additional endpoints will be
 available: [/storedrequests/openrtb2](endpoints/storedrequests/openrtb2.md) and [/storedrequests/amp](endpoints/storedrequests/amp.md).
+- `settings.in-memory-cache.account-invalidation-enabled` - if equals to `true` additional admin protected endpoints will be
+available: `/cache/invalidate?account={accountId}` which remove account from the cache.
 - `settings.in-memory-cache.http-update.endpoint` - the url to fetch stored request updates.
 - `settings.in-memory-cache.http-update.amp-endpoint` - the url to fetch AMP stored request updates.
 - `settings.in-memory-cache.http-update.refresh-rate` - refresh period in ms for stored request updates.
 - `settings.in-memory-cache.http-update.timeout` - timeout for obtaining stored request updates.
+- `settings.in-memory-cache.jdbc-update.init-query` - initial query for fetching all stored requests at the startup.
+- `settings.in-memory-cache.jdbc-update.update-query` - a query for periodical update of stored requests, that should
+contain 'WHERE last_updated > ?' to fetch only the records that were updated since previous check.
+- `settings.in-memory-cache.jdbc-update.amp-init-query` - initial query for fetching all AMP stored requests at the startup.
+- `settings.in-memory-cache.jdbc-update.amp-update-query` - a query for periodical update of AMP stored requests, that should
+contain 'WHERE last_updated > ?' to fetch only the records that were updated since previous check.
+- `settings.in-memory-cache.jdbc-update.refresh-rate` - refresh period in ms for stored request updates.
+- `settings.in-memory-cache.jdbc-update.timeout` - timeout for obtaining stored request updates.
 
 ## Host Cookie
 - `host-cookie.optout-cookie.name` - set the cookie name for optout checking.
@@ -161,27 +225,56 @@ available: [/storedrequests/openrtb2](endpoints/storedrequests/openrtb2.md) and 
 - `host-cookie.cookie-name` - set the name value for host cookie.
 - `host-cookie.domain` - set the domain value for host cookie.
 - `host-cookie.ttl-days` - set the cookie ttl in days.
+- `host-cookie.max-cookie-size-bytes` - a size limit for UIDs Cookie. Valid values are `0` (disabled) and `>500`.
 
 ## Google Recaptcha
 - `recaptcha-url` - the url for Google Recaptcha service to submit user verification.
 - `recaptcha-secret` - Google Recaptcha secret string given to certain domain account.
 
 ## Server status
-- `status-response` - message returned by /status endpoint when server is ready to serve requests.
-If not defined in config, endpoint will respond with 'No Content' (204) status with empty body.
+- `status-response` - message returned by ApplicationChecker in /status endpoint when server is ready to serve requests.
+If not defined in config all other Health Checkers would be disabled and endpoint will respond with 'No Content' (204) status with empty body.
+
+## Health Check
+- `health-check.database.enabled` - if equals to `true` the database health check will be enabled to periodically check database status.
+- `health-check.database.refresh-period-ms` - the refresh period for database status updates.
+- `health-check.geolocation.enabled` - if equals to `true` the geolocation service health check will be enabled to periodically check the status.
+- `health-check.geolocation.refresh-period-ms` - the refresh period for geolocation service status updates.
 
 ## GDPR
 - `gdpr.eea-countries` - comma separated list of countries in European Economic Area (EEA).
 - `gdpr.default-value` - determines GDPR in scope default value (if no information in request and no geolocation data).
 - `gdpr.host-vendor-id` - the organization running a cluster of Prebid Servers.
+- `gdpr.enabled` - gdpr feature switch. Default `true`.
+- `gdpr.purposes.pN.enforce-purpose` - define type of enforcement confirmation: `no`/`basic`/`full`. Default `full`
+- `gdpr.purposes.pN.enforce-vendors` - if equals to `true`, user must give consent to use vendors. Purposes will be omitted. Default `true`
+- `gdpr.purposes.pN.vendor-exceptions[]` - bidder names that will be treated opposite to `pN.enforce-vendors` value.
+- `gdpr.special-features.sfN.enforce` - if equals to `true`, special feature will be enforced for purpose. Default `true`
+- `gdpr.special-features.sfN.vendor-exceptions[]` - bidder names that will be treated opposite to `sfN.enforce` value.
+- `gdpr.purpose-one-treatment-interpretation` - flag that allowing to skip the Purpose one enforcement workflow.
 - `gdpr.vendorlist.http-endpoint-template` - template string for vendor list url, where `{VERSION}` is used as version number placeholder.
 - `gdpr.vendorlist.http-default-timeout-ms` - default operation timeout for obtaining new vendor list.
 - `gdpr.vendorlist.filesystem-cache-dir` - directory for local storage cache for vendor list. Should be with `WRITE` permissions for user application run from.
-- `gdpr.geolocation.enabled` - if equals to `true` the geo location service will be used to determine the country for client request.
 
-## General settings
-- `external-url` - the setting stands for external URL prebid server is reachable by, 
-for example address of the load-balancer e.g. http://prebid.host.com.
+## CCPA
+- `ccpa.enforce` - if equals to `true` enforces to check ccpa policy, otherwise ignore ccpa verification.
+
+## Geo Location
+- `geolocation.enabled` - if equals to `true` the geo location service will be used to determine the country for client request.
+- `geolocation.circuit-breaker.enabled` - if equals to `true` circuit breaker will be used to make geo location client more robust.
+- `geolocation.circuit-breaker.opening-threshold` - the number of failures before opening the circuit.
+- `geolocation.circuit-breaker.opening-interval-ms` - time interval for opening the circuit breaker if failures count reached.
+- `geolocation.circuit-breaker.closing-interval-ms` - time spent in open state before attempting to re-try.
+- `geolocation.type` - set the geo location service provider, can be `maxmind` or custom provided by hosting company.
+- `geolocation.maxmind` - section for [MaxMind](https://www.maxmind.com) configuration as geo location service provider.
+- `geolocation.maxmind.remote-file-syncer` - use RemoteFileSyncer component for downloading/updating MaxMind database file. See [RemoteFileSyncer](#remote-file-syncer) section for its configuration.
+
+## Auction (Legacy)
 - `default-timeout-ms` - this setting controls default timeout for /auction endpoint.
 - `max-timeout-ms` - this setting controls maximum timeout for /auction endpoint.
+- `timeout-adjustment-ms` - reduces timeout value passed in legacy Auction request so that Prebid Server can handle timeouts from adapters and respond to the request before it times out.
+
+## General settings
+- `host-id` - the  ID of node where prebid server deployed.
+- `external-url` - the setting stands for external URL prebid server is reachable by, for example address of the load-balancer e.g. http://prebid.host.com.
 - `admin.port` - the port to listen on administration requests.

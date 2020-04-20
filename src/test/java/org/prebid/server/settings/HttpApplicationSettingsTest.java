@@ -10,10 +10,12 @@ import org.mockito.Mock;
 import org.mockito.junit.MockitoJUnit;
 import org.mockito.junit.MockitoRule;
 import org.prebid.server.VertxTest;
+import org.prebid.server.exception.PreBidException;
 import org.prebid.server.execution.Timeout;
 import org.prebid.server.execution.TimeoutFactory;
 import org.prebid.server.settings.model.Account;
 import org.prebid.server.settings.model.StoredDataResult;
+import org.prebid.server.settings.model.StoredResponseDataResult;
 import org.prebid.server.settings.proto.response.HttpFetcherResponse;
 import org.prebid.server.vertx.http.HttpClient;
 import org.prebid.server.vertx.http.model.HttpClientResponse;
@@ -43,6 +45,7 @@ public class HttpApplicationSettingsTest extends VertxTest {
 
     private static final String ENDPOINT = "http://stored-requests";
     private static final String AMP_ENDPOINT = "http://amp-stored-requests";
+    private static final String VIDEO_ENDPOINT = "http://video-stored-requests";
 
     @Rule
     public final MockitoRule mockitoRule = MockitoJUnit.rule();
@@ -57,7 +60,8 @@ public class HttpApplicationSettingsTest extends VertxTest {
 
     @Before
     public void setUp() {
-        httpApplicationSettings = new HttpApplicationSettings(httpClient, ENDPOINT, AMP_ENDPOINT);
+        httpApplicationSettings = new HttpApplicationSettings(httpClient, jacksonMapper, ENDPOINT, AMP_ENDPOINT,
+                VIDEO_ENDPOINT);
 
         final Clock clock = Clock.fixed(Instant.now(), ZoneId.systemDefault());
         final TimeoutFactory timeoutFactory = new TimeoutFactory(clock);
@@ -68,14 +72,24 @@ public class HttpApplicationSettingsTest extends VertxTest {
     @Test
     public void creationShouldFailsOnInvalidEndpoint() {
         assertThatIllegalArgumentException()
-                .isThrownBy(() -> new HttpApplicationSettings(httpClient, "invalid_url", AMP_ENDPOINT))
+                .isThrownBy(() -> new HttpApplicationSettings(httpClient, jacksonMapper, "invalid_url", AMP_ENDPOINT,
+                        VIDEO_ENDPOINT))
                 .withMessage("URL supplied is not valid: invalid_url");
     }
 
     @Test
     public void creationShouldFailsOnInvalidAmpEndpoint() {
         assertThatIllegalArgumentException()
-                .isThrownBy(() -> new HttpApplicationSettings(httpClient, ENDPOINT, "invalid_url"))
+                .isThrownBy(() -> new HttpApplicationSettings(httpClient, jacksonMapper, ENDPOINT, "invalid_url",
+                        VIDEO_ENDPOINT))
+                .withMessage("URL supplied is not valid: invalid_url");
+    }
+
+    @Test
+    public void creationShouldFailsOnInvalidVideoEndpoint() {
+        assertThatIllegalArgumentException()
+                .isThrownBy(() -> new HttpApplicationSettings(httpClient, jacksonMapper, ENDPOINT, AMP_ENDPOINT,
+                        "invalid_url"))
                 .withMessage("URL supplied is not valid: invalid_url");
     }
 
@@ -86,7 +100,7 @@ public class HttpApplicationSettingsTest extends VertxTest {
 
         // then
         assertThat(future.failed()).isTrue();
-        assertThat(future.cause().getMessage()).isEqualTo("Not supported");
+        assertThat(future.cause()).isInstanceOf(PreBidException.class).hasMessage("Not supported");
     }
 
     @Test
@@ -96,7 +110,17 @@ public class HttpApplicationSettingsTest extends VertxTest {
 
         // then
         assertThat(future.failed()).isTrue();
-        assertThat(future.cause().getMessage()).isEqualTo("Not supported");
+        assertThat(future.cause()).isInstanceOf(PreBidException.class).hasMessage("Not supported");
+    }
+
+    @Test
+    public void getStoredResponsesShouldReturnFailedFutureWithNotSupportedReason() {
+        // when
+        final Future<StoredResponseDataResult> future = httpApplicationSettings.getStoredResponses(null, null);
+
+        // then
+        assertThat(future.failed()).isTrue();
+        assertThat(future.cause()).isInstanceOf(PreBidException.class).hasMessage("Not supported");
     }
 
     @Test
@@ -137,21 +161,23 @@ public class HttpApplicationSettingsTest extends VertxTest {
                 timeout);
 
         // then
-        verify(httpClient).get(eq("http://stored-requests?request-ids=[\"id2\",\"id1\"]&imp-ids=[\"id4\",\"id3\"]"), any(), anyLong());
+        verify(httpClient).get(eq("http://stored-requests?request-ids=[\"id2\",\"id1\"]&imp-ids=[\"id4\",\"id3\"]"),
+                any(), anyLong());
     }
 
     @Test
     public void getStoredDataShouldSendHttpRequestWithExpectedAppendedParams() {
         // given
         givenHttpClientReturnsResponse(200, null);
-        httpApplicationSettings = new HttpApplicationSettings(httpClient, "http://some-domain?param1=value1",
-                AMP_ENDPOINT);
+        httpApplicationSettings = new HttpApplicationSettings(httpClient, jacksonMapper,
+                "http://some-domain?param1=value1", AMP_ENDPOINT, VIDEO_ENDPOINT);
 
         // when
         httpApplicationSettings.getStoredData(singleton("id1"), singleton("id2"), timeout);
 
         // then
-        verify(httpClient).get(eq("http://some-domain?param1=value1&request-ids=[\"id1\"]&imp-ids=[\"id2\"]"), any(), anyLong());
+        verify(httpClient).get(eq("http://some-domain?param1=value1&request-ids=[\"id1\"]&imp-ids=[\"id2\"]"), any(),
+                anyLong());
     }
 
     @Test

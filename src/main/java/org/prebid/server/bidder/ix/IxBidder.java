@@ -11,18 +11,17 @@ import com.iab.openrtb.request.Site;
 import com.iab.openrtb.response.BidResponse;
 import com.iab.openrtb.response.SeatBid;
 import io.vertx.core.http.HttpMethod;
-import io.vertx.core.json.DecodeException;
-import io.vertx.core.json.Json;
 import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.prebid.server.bidder.Bidder;
-import org.prebid.server.bidder.BidderUtil;
 import org.prebid.server.bidder.model.BidderBid;
 import org.prebid.server.bidder.model.BidderError;
 import org.prebid.server.bidder.model.HttpCall;
 import org.prebid.server.bidder.model.HttpRequest;
 import org.prebid.server.bidder.model.Result;
 import org.prebid.server.exception.PreBidException;
+import org.prebid.server.json.DecodeException;
+import org.prebid.server.json.JacksonMapper;
 import org.prebid.server.proto.openrtb.ext.ExtPrebid;
 import org.prebid.server.proto.openrtb.ext.request.ix.ExtImpIx;
 import org.prebid.server.proto.openrtb.ext.response.BidType;
@@ -51,9 +50,11 @@ public class IxBidder implements Bidder<BidRequest> {
     private static final String DEFAULT_BID_CURRENCY = "USD";
 
     private final String endpointUrl;
+    private final JacksonMapper mapper;
 
-    public IxBidder(String endpointUrl) {
+    public IxBidder(String endpointUrl, JacksonMapper mapper) {
         this.endpointUrl = HttpUtil.validateUrl(Objects.requireNonNull(endpointUrl));
+        this.mapper = Objects.requireNonNull(mapper);
     }
 
     @Override
@@ -89,8 +90,8 @@ public class IxBidder implements Bidder<BidRequest> {
                 .map(request -> HttpRequest.<BidRequest>builder()
                         .method(HttpMethod.POST)
                         .uri(endpointUrl)
-                        .body(Json.encode(request))
-                        .headers(BidderUtil.headers())
+                        .body(mapper.encode(request))
+                        .headers(HttpUtil.headers())
                         .payload(request)
                         .build())
                 .collect(Collectors.toList());
@@ -105,8 +106,8 @@ public class IxBidder implements Bidder<BidRequest> {
         }
     }
 
-    private static void makeRequests(BidRequest bidRequest, Imp imp, List<BidRequest> prioritizedRequests,
-                                     List<BidRequest> regularRequests) {
+    private void makeRequests(BidRequest bidRequest, Imp imp, List<BidRequest> prioritizedRequests,
+                              List<BidRequest> regularRequests) {
         List<Format> formats = imp.getBanner().getFormat();
         if (CollectionUtils.isEmpty(formats)) {
             formats = makeFormatFromBannerWidthAndHeight(imp);
@@ -129,10 +130,10 @@ public class IxBidder implements Bidder<BidRequest> {
                 Format.builder().w(banner.getW()).h(banner.getH()).build());
     }
 
-    private static ExtImpIx parseAndValidateImpExt(Imp imp) {
+    private ExtImpIx parseAndValidateImpExt(Imp imp) {
         final ExtImpIx extImpIx;
         try {
-            extImpIx = Json.mapper.<ExtPrebid<?, ExtImpIx>>convertValue(imp.getExt(),
+            extImpIx = mapper.mapper().convertValue(imp.getExt(),
                     IX_EXT_TYPE_REFERENCE).getBidder();
         } catch (IllegalArgumentException e) {
             throw new PreBidException(e.getMessage(), e);
@@ -140,11 +141,6 @@ public class IxBidder implements Bidder<BidRequest> {
 
         if (StringUtils.isBlank(extImpIx.getSiteId())) {
             throw new PreBidException("Missing siteId param");
-        }
-
-        final List<Integer> size = extImpIx.getSize();
-        if (size != null && size.size() < 2) {
-            throw new PreBidException("Incorrect Size, expected at least 2 values");
         }
         return extImpIx;
     }
@@ -154,16 +150,12 @@ public class IxBidder implements Bidder<BidRequest> {
         final BidRequest.BidRequestBuilder requestBuilder = bidRequest.toBuilder();
         final Imp.ImpBuilder impBuilder = imp.toBuilder();
         final Banner.BannerBuilder bannerBuilder = imp.getBanner().toBuilder();
-        if (formats.size() > REQUEST_LIMIT) {
-            formats = formats.subList(0, REQUEST_LIMIT);
-        }
+        final List<Format> limitedFormats = formats.size() > REQUEST_LIMIT
+                ? formats.subList(0, REQUEST_LIMIT)
+                : formats;
 
-        final List<Integer> sizes = extImpIx.getSize();
         final List<BidRequest> requests = new ArrayList<>();
-        for (Format format : formats) {
-            if (CollectionUtils.isNotEmpty(sizes) && !isValidIxSize(format, sizes)) {
-                continue;
-            }
+        for (Format format : limitedFormats) {
             bannerBuilder.format(Collections.singletonList(format))
                     .w(format.getW())
                     .h(format.getH());
@@ -178,10 +170,6 @@ public class IxBidder implements Bidder<BidRequest> {
         return requests;
     }
 
-    private static boolean isValidIxSize(Format format, List<Integer> sizes) {
-        return Objects.equals(format.getW(), sizes.get(0)) && Objects.equals(format.getH(), sizes.get(1));
-    }
-
     private static Site modifySite(BidRequest bidRequest, ExtImpIx extImpIx) {
         final Site site = bidRequest.getSite();
         final Site.SiteBuilder siteBuilder = site == null ? Site.builder() : site.toBuilder();
@@ -192,7 +180,7 @@ public class IxBidder implements Bidder<BidRequest> {
     @Override
     public Result<List<BidderBid>> makeBids(HttpCall<BidRequest> httpCall, BidRequest bidRequest) {
         try {
-            final BidResponse bidResponse = Json.decodeValue(httpCall.getResponse().getBody(), BidResponse.class);
+            final BidResponse bidResponse = mapper.decodeValue(httpCall.getResponse().getBody(), BidResponse.class);
             return Result.of(extractBids(bidResponse), Collections.emptyList());
         } catch (DecodeException | PreBidException e) {
             return Result.emptyWithError(BidderError.badServerResponse(e.getMessage()));

@@ -12,6 +12,7 @@ import org.mockito.BDDMockito;
 import org.mockito.Mock;
 import org.mockito.junit.MockitoJUnit;
 import org.mockito.junit.MockitoRule;
+import org.prebid.server.VertxTest;
 import org.prebid.server.bidder.model.BidderBid;
 import org.prebid.server.bidder.model.BidderError;
 import org.prebid.server.bidder.model.BidderSeatBid;
@@ -35,6 +36,7 @@ import static java.util.Collections.singletonList;
 import static org.apache.commons.lang3.StringUtils.EMPTY;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.BDDMockito.given;
 import static org.mockito.Mockito.anyLong;
@@ -44,7 +46,7 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyZeroInteractions;
 
-public class HttpBidderRequesterTest {
+public class HttpBidderRequesterTest extends VertxTest {
 
     @Rule
     public final MockitoRule mockitoRule = MockitoJUnit.rule();
@@ -54,7 +56,7 @@ public class HttpBidderRequesterTest {
     @Mock
     private HttpClient httpClient;
 
-    private HttpBidderRequester<?> bidderHttpConnector;
+    private HttpBidderRequester bidderHttpConnector;
 
     private Timeout timeout;
     private Timeout expiredTimeout;
@@ -66,7 +68,7 @@ public class HttpBidderRequesterTest {
         timeout = timeoutFactory.create(500L);
         expiredTimeout = timeoutFactory.create(clock.instant().minusMillis(1500L).toEpochMilli(), 1000L);
 
-        bidderHttpConnector = new HttpBidderRequester<>(bidder, httpClient);
+        bidderHttpConnector = new HttpBidderRequester(httpClient, null);
     }
 
     @Test
@@ -75,15 +77,15 @@ public class HttpBidderRequesterTest {
         given(bidder.makeHttpRequests(any())).willReturn(Result.of(emptyList(), emptyList()));
 
         // when
-        final BidderSeatBid bidderSeatBid = bidderHttpConnector.requestBids(BidRequest.builder().build(), timeout)
-                .result();
+        final BidderSeatBid bidderSeatBid =
+                bidderHttpConnector.requestBids(bidder, BidRequest.builder().build(), timeout, false).result();
 
         // then
         assertThat(bidderSeatBid.getBids()).isEmpty();
         assertThat(bidderSeatBid.getHttpCalls()).isEmpty();
         assertThat(bidderSeatBid.getErrors())
-                .containsOnly(BidderError.failedToRequestBids("The bidder failed to generate any bid " +
-                        "requests, but also failed to generate an error"));
+                .containsOnly(BidderError.failedToRequestBids(
+                        "The bidder failed to generate any bid requests, but also failed to generate an error"));
     }
 
     @Test
@@ -93,8 +95,8 @@ public class HttpBidderRequesterTest {
                 asList(BidderError.badInput("error1"), BidderError.badInput("error2"))));
 
         // when
-        final BidderSeatBid bidderSeatBid = bidderHttpConnector.requestBids(BidRequest.builder().build(), timeout)
-                .result();
+        final BidderSeatBid bidderSeatBid =
+                bidderHttpConnector.requestBids(bidder, BidRequest.builder().build(), timeout, false).result();
 
         // then
         assertThat(bidderSeatBid.getBids()).isEmpty();
@@ -121,7 +123,7 @@ public class HttpBidderRequesterTest {
         headers.add("header2", "value2");
 
         // when
-        bidderHttpConnector.requestBids(BidRequest.builder().build(), timeout);
+        bidderHttpConnector.requestBids(bidder, BidRequest.builder().build(), timeout, false);
 
         // then
         verify(httpClient).request(eq(HttpMethod.POST), eq("uri"), eq(headers), eq("requestBody"), eq(500L));
@@ -140,7 +142,7 @@ public class HttpBidderRequesterTest {
                 emptyList()));
 
         // when
-        bidderHttpConnector.requestBids(BidRequest.builder().build(), timeout);
+        bidderHttpConnector.requestBids(bidder, BidRequest.builder().build(), timeout, false);
 
         // then
         verify(httpClient).request(any(), anyString(), any(), isNull(), anyLong());
@@ -167,7 +169,7 @@ public class HttpBidderRequesterTest {
                 emptyList()));
 
         // when
-        bidderHttpConnector.requestBids(BidRequest.builder().build(), timeout);
+        bidderHttpConnector.requestBids(bidder, BidRequest.builder().build(), timeout, false);
 
         // then
         verify(httpClient, times(2)).request(any(), anyString(), any(), any(), anyLong());
@@ -191,15 +193,15 @@ public class HttpBidderRequesterTest {
         given(bidder.makeBids(any(), any())).willReturn(Result.of(bids, emptyList()));
 
         // when
-        final BidderSeatBid bidderSeatBid = bidderHttpConnector.requestBids(BidRequest.builder().build(), timeout)
-                .result();
+        final BidderSeatBid bidderSeatBid =
+                bidderHttpConnector.requestBids(bidder, BidRequest.builder().build(), timeout, false).result();
 
         // then
         assertThat(bidderSeatBid.getBids()).containsOnlyElementsOf(bids);
     }
 
     @Test
-    public void shouldReturnFullDebugInfoIfTestFlagIsOn() {
+    public void shouldReturnFullDebugInfoIfDebugEnabled() {
         // given
         given(bidder.makeHttpRequests(any())).willReturn(Result.of(asList(
                 HttpRequest.<BidRequest>builder()
@@ -224,7 +226,7 @@ public class HttpBidderRequesterTest {
 
         // when
         final BidderSeatBid bidderSeatBid =
-                bidderHttpConnector.requestBids(BidRequest.builder().test(1).build(), timeout).result();
+                bidderHttpConnector.requestBids(bidder, BidRequest.builder().build(), timeout, true).result();
 
         // then
         assertThat(bidderSeatBid.getHttpCalls()).hasSize(2).containsOnly(
@@ -235,7 +237,7 @@ public class HttpBidderRequesterTest {
     }
 
     @Test
-    public void shouldReturnPartialDebugInfoIfTestFlagIsOnAndGlobalTimeoutAlreadyExpired() {
+    public void shouldReturnPartialDebugInfoIfDebugEnabledAndGlobalTimeoutAlreadyExpired() {
         // given
         given(bidder.makeHttpRequests(any())).willReturn(Result.of(singletonList(
                 HttpRequest.<BidRequest>builder()
@@ -248,7 +250,7 @@ public class HttpBidderRequesterTest {
 
         // when
         final BidderSeatBid bidderSeatBid =
-                bidderHttpConnector.requestBids(BidRequest.builder().test(1).build(), expiredTimeout).result();
+                bidderHttpConnector.requestBids(bidder, BidRequest.builder().build(), expiredTimeout, true).result();
 
         // then
         assertThat(bidderSeatBid.getHttpCalls()).hasSize(1).containsOnly(
@@ -256,7 +258,7 @@ public class HttpBidderRequesterTest {
     }
 
     @Test
-    public void shouldReturnPartialDebugInfoIfTestFlagIsOnAndHttpErrorOccurs() {
+    public void shouldReturnPartialDebugInfoIfDebugEnabledAndHttpErrorOccurs() {
         // given
         given(bidder.makeHttpRequests(any())).willReturn(Result.of(singletonList(
                 HttpRequest.<BidRequest>builder()
@@ -271,7 +273,7 @@ public class HttpBidderRequesterTest {
 
         // when
         final BidderSeatBid bidderSeatBid =
-                bidderHttpConnector.requestBids(BidRequest.builder().test(1).build(), timeout).result();
+                bidderHttpConnector.requestBids(bidder, BidRequest.builder().build(), timeout, true).result();
 
         // then
         assertThat(bidderSeatBid.getHttpCalls()).hasSize(1).containsOnly(
@@ -279,7 +281,7 @@ public class HttpBidderRequesterTest {
     }
 
     @Test
-    public void shouldReturnFullDebugInfoIfTestFlagIsOnAndErrorStatus() {
+    public void shouldReturnFullDebugInfoIfDebugEnabledAndErrorStatus() {
         // given
         given(bidder.makeHttpRequests(any())).willReturn(Result.of(singletonList(
                 HttpRequest.<BidRequest>builder()
@@ -294,7 +296,7 @@ public class HttpBidderRequesterTest {
 
         // when
         final BidderSeatBid bidderSeatBid =
-                bidderHttpConnector.requestBids(BidRequest.builder().test(1).build(), timeout).result();
+                bidderHttpConnector.requestBids(bidder, BidRequest.builder().build(), timeout, true).result();
 
         // then
         assertThat(bidderSeatBid.getHttpCalls()).hasSize(1).containsOnly(
@@ -319,7 +321,7 @@ public class HttpBidderRequesterTest {
 
         // when
         final BidderSeatBid bidderSeatBid =
-                bidderHttpConnector.requestBids(BidRequest.builder().build(), expiredTimeout).result();
+                bidderHttpConnector.requestBids(bidder, BidRequest.builder().build(), expiredTimeout, false).result();
 
         // then
         assertThat(bidderSeatBid.getErrors()).hasSize(1)
@@ -376,7 +378,6 @@ public class HttpBidderRequesterTest {
                         .build()),
                 singletonList(BidderError.badInput("makeHttpRequestsError"))));
 
-
         given(httpClient.request(any(), anyString(), any(), any(), anyLong()))
                 // simulate response error for the first request
                 .willReturn(Future.failedFuture(new RuntimeException("Response exception")))
@@ -397,13 +398,13 @@ public class HttpBidderRequesterTest {
 
         // when
         final BidderSeatBid bidderSeatBid = bidderHttpConnector
-                .requestBids(BidRequest.builder().test(1).build(), timeout)
+                .requestBids(bidder, BidRequest.builder().test(1).build(), timeout, false)
                 .result();
 
         // then
-        // only one call is expected since other requests failed with errors or returned with 204 status
-        verify(bidder).makeBids(any(), any());
-        assertThat(bidderSeatBid.getBids()).hasSize(1);
+        // only two calls are expected (200 and 204) since other requests have failed with errors.
+        verify(bidder, times(2)).makeBids(any(), any());
+        assertThat(bidderSeatBid.getBids()).hasSize(2);
         assertThat(bidderSeatBid.getErrors()).containsOnly(
                 BidderError.badInput("makeHttpRequestsError"),
                 BidderError.generic("Response exception"),
@@ -411,6 +412,27 @@ public class HttpBidderRequesterTest {
                 BidderError.badServerResponse("Unexpected status code: 500. Run with request.test = 1 for more info"),
                 BidderError.badInput("Unexpected status code: 400. Run with request.test = 1 for more info"),
                 BidderError.badServerResponse("makeBidsError"));
+    }
+
+    @Test
+    public void shouldPassEmptyJsonResponseBodyToMakeBidsIfResponseStatusIs204() {
+        // given
+        given(bidder.makeHttpRequests(any())).willReturn(Result.of(singletonList(
+                HttpRequest.<BidRequest>builder()
+                        .method(HttpMethod.POST)
+                        .uri(EMPTY)
+                        .body(EMPTY)
+                        .headers(new CaseInsensitiveHeaders())
+                        .build()),
+                emptyList()));
+
+        givenHttpClientReturnsResponse(204, EMPTY);
+
+        // when
+        bidderHttpConnector.requestBids(bidder, BidRequest.builder().test(1).build(), timeout, false);
+
+        // then
+        verify(bidder).makeBids(argThat(httpCall -> httpCall.getResponse().getBody().equals("{}")), any());
     }
 
     private void givenHttpClientReturnsResponse(int statusCode, String response) {

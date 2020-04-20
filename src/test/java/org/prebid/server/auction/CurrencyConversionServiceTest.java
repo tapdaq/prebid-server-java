@@ -2,10 +2,12 @@ package org.prebid.server.auction;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import io.vertx.core.Future;
+import io.vertx.core.Handler;
 import io.vertx.core.Vertx;
 import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.MockitoJUnit;
 import org.mockito.junit.MockitoRule;
@@ -13,20 +15,27 @@ import org.prebid.server.VertxTest;
 import org.prebid.server.currency.CurrencyConversionService;
 import org.prebid.server.currency.proto.CurrencyConversionRates;
 import org.prebid.server.exception.PreBidException;
+import org.prebid.server.spring.config.model.ExternalConversionProperties;
 import org.prebid.server.vertx.http.HttpClient;
 import org.prebid.server.vertx.http.model.HttpClientResponse;
 
 import java.math.BigDecimal;
-import java.time.ZonedDateTime;
 import java.util.HashMap;
 import java.util.Map;
 
 import static java.util.Collections.emptyMap;
 import static java.util.Collections.singletonMap;
-import static org.assertj.core.api.Assertions.*;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
+import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.BDDMockito.given;
-import static org.mockito.Mockito.*;
+import static org.mockito.Mockito.anyLong;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 
 public class CurrencyConversionServiceTest extends VertxTest {
 
@@ -35,7 +44,7 @@ public class CurrencyConversionServiceTest extends VertxTest {
     private static final String EUR = "EUR";
     private static final String UAH = "UAH";
     private static final String AUD = "AUD";
-    private static final String URL = "http://currency.prebid.org/latest.json";
+    private static final String URL = "http://currency-rates/latest.json";
 
     @Rule
     public final MockitoRule mockitoRule = MockitoJUnit.rule();
@@ -55,21 +64,14 @@ public class CurrencyConversionServiceTest extends VertxTest {
         givenHttpClientReturnsResponse(httpClient, 200,
                 mapper.writeValueAsString(CurrencyConversionRates.of(null, currencyRates)));
 
-        currencyService = createAndInitService(URL, 1L, vertx, httpClient);
+        currencyService = setExternalResource(URL, 1L, vertx, httpClient);
     }
 
     @Test
     public void creationShouldFailOnInvalidCurrencyServerUrl() {
         assertThatIllegalArgumentException()
-                .isThrownBy(() -> createAndInitService("invalid-url", 1L, vertx, httpClient))
+                .isThrownBy(() -> setExternalResource("invalid-url", 1L, vertx, httpClient))
                 .withMessage("URL supplied is not valid: invalid-url");
-    }
-
-    @Test
-    public void creationShouldFailOnInvalidPeriodValue() {
-        assertThatIllegalArgumentException()
-                .isThrownBy(() -> createAndInitService(URL, 0L, vertx, httpClient))
-                .withMessage("Refresh period for updating rates must be positive value");
     }
 
     @Test
@@ -149,12 +151,12 @@ public class CurrencyConversionServiceTest extends VertxTest {
         requestConversionRates.put(EUR, singletonMap(USD, BigDecimal.valueOf(0.5)));
 
         // when
-        final BigDecimal price = currencyService.convertCurrency(new BigDecimal("1.23"), requestConversionRates, EUR, USD);
+        final BigDecimal price = currencyService.convertCurrency(new BigDecimal("1.23"), requestConversionRates, EUR,
+                USD);
 
         // then
         assertThat(price.compareTo(BigDecimal.valueOf(2.460))).isEqualTo(0);
     }
-
 
     @Test
     public void convertCurrencyShouldUseLatestRatesIfRequestRatesIsNull() {
@@ -188,6 +190,17 @@ public class CurrencyConversionServiceTest extends VertxTest {
     }
 
     @Test
+    public void convertCurrencyShouldFailWhenRequestRatesIsNullAndNoExternalRatesProvided() {
+        // when
+        final CurrencyConversionService currencyConversionService = new CurrencyConversionService(null);
+
+        // when and then
+        assertThatExceptionOfType(PreBidException.class)
+                .isThrownBy(() -> currencyConversionService.convertCurrency(BigDecimal.ONE, null, EUR, GBP))
+                .withMessage("no currency conversion available");
+    }
+
+    @Test
     public void convertCurrencyShouldThrowPrebidExceptionIfServerAndRequestRatesAreNull() {
         // when and then
         assertThatExceptionOfType(PreBidException.class)
@@ -213,7 +226,7 @@ public class CurrencyConversionServiceTest extends VertxTest {
         givenHttpClientReturnsResponse(httpClient, 503, "server unavailable");
 
         // when
-        currencyService = createAndInitService(URL, 1L, vertx, httpClient);
+        currencyService = setExternalResource(URL, 1L, vertx, httpClient);
 
         // then
         assertThatExceptionOfType(PreBidException.class)
@@ -227,7 +240,7 @@ public class CurrencyConversionServiceTest extends VertxTest {
         givenHttpClientReturnsResponse(httpClient, 200, "{\"foo\": \"bar\"}");
 
         // when
-        currencyService = createAndInitService(URL, 1L, vertx, httpClient);
+        currencyService = setExternalResource(URL, 1L, vertx, httpClient);
 
         // then
         assertThatExceptionOfType(PreBidException.class)
@@ -235,25 +248,31 @@ public class CurrencyConversionServiceTest extends VertxTest {
                 .withMessage("no currency conversion available");
     }
 
+    @SuppressWarnings("unchecked")
     @Test
     public void initializeShouldMakeOneInitialRequestAndTwoScheduled() {
         // given
-        final Vertx vertx = Vertx.vertx();
+        given(vertx.setPeriodic(anyLong(), any())).willReturn(1L);
         final HttpClient httpClient = mock(HttpClient.class);
         givenHttpClientReturnsResponse(httpClient, 200, "{\"foo\": \"bar\"}");
 
-        // when
-        currencyService = createAndInitService(URL, 1000, vertx, httpClient);
+        // when and then
+        currencyService = setExternalResource(URL, 1000, vertx, httpClient);
 
-        // then
-        verify(httpClient, after(2100).times(3)).get(anyString(), anyLong());
-        vertx.close();
+        final ArgumentCaptor<Handler<Long>> handlerCaptor = ArgumentCaptor.forClass(Handler.class);
+        verify(vertx).setPeriodic(eq(1000L), handlerCaptor.capture());
+        // fire timer two times
+        final Handler<Long> handler = handlerCaptor.getValue();
+        handler.handle(1L);
+        handler.handle(1L);
+
+        verify(httpClient, times(3)).get(anyString(), anyLong());
     }
 
-    private static CurrencyConversionService createAndInitService(String url, long refreshPeriod, Vertx vertx,
-                                                                  HttpClient httpClient) {
-        final CurrencyConversionService currencyService =
-                new CurrencyConversionService(url, refreshPeriod, vertx, httpClient);
+    private static CurrencyConversionService setExternalResource(String url, long refreshPeriod, Vertx vertx,
+                                                                 HttpClient httpClient) {
+        final CurrencyConversionService currencyService = new CurrencyConversionService(
+                new ExternalConversionProperties(url, 1000L, refreshPeriod, vertx, httpClient, jacksonMapper));
         currencyService.initialize();
         return currencyService;
     }

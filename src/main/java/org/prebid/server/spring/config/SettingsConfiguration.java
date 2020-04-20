@@ -8,6 +8,8 @@ import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 import org.apache.commons.lang3.ObjectUtils;
+import org.prebid.server.execution.TimeoutFactory;
+import org.prebid.server.json.JacksonMapper;
 import org.prebid.server.metric.Metrics;
 import org.prebid.server.settings.ApplicationSettings;
 import org.prebid.server.settings.CachingApplicationSettings;
@@ -17,6 +19,8 @@ import org.prebid.server.settings.HttpApplicationSettings;
 import org.prebid.server.settings.JdbcApplicationSettings;
 import org.prebid.server.settings.SettingsCache;
 import org.prebid.server.settings.service.HttpPeriodicRefreshService;
+import org.prebid.server.settings.service.JdbcPeriodicRefreshService;
+import org.prebid.server.spring.config.model.CircuitBreakerProperties;
 import org.prebid.server.vertx.ContextRunner;
 import org.prebid.server.vertx.http.HttpClient;
 import org.prebid.server.vertx.jdbc.BasicJdbcClient;
@@ -54,9 +58,11 @@ public class SettingsConfiguration {
                 @Value("${settings.filesystem.settings-filename}") String settingsFileName,
                 @Value("${settings.filesystem.stored-requests-dir}") String storedRequestsDir,
                 @Value("${settings.filesystem.stored-imps-dir}") String storedImpsDir,
+                @Value("${settings.filesystem.stored-responses-dir}") String storedResponsesDir,
                 FileSystem fileSystem) {
 
-            return FileApplicationSettings.create(fileSystem, settingsFileName, storedRequestsDir, storedImpsDir);
+            return new FileApplicationSettings(fileSystem, settingsFileName, storedRequestsDir, storedImpsDir,
+                    storedResponsesDir);
         }
     }
 
@@ -68,9 +74,11 @@ public class SettingsConfiguration {
         JdbcApplicationSettings jdbcApplicationSettings(
                 @Value("${settings.database.stored-requests-query}") String storedRequestsQuery,
                 @Value("${settings.database.amp-stored-requests-query}") String ampStoredRequestsQuery,
+                @Value("${settings.database.stored-responses-query}") String storedResponseQuery,
                 JdbcClient jdbcClient) {
 
-            return new JdbcApplicationSettings(jdbcClient, storedRequestsQuery, ampStoredRequestsQuery);
+            return new JdbcApplicationSettings(jdbcClient, storedRequestsQuery, ampStoredRequestsQuery,
+                    storedResponseQuery);
         }
 
         @Bean
@@ -83,24 +91,29 @@ public class SettingsConfiguration {
         }
 
         @Bean
+        @ConfigurationProperties(prefix = "settings.database.circuit-breaker")
+        @ConditionalOnProperty(prefix = "settings.database.circuit-breaker", name = "enabled", havingValue = "true")
+        CircuitBreakerProperties databaseCircuitBreakerProperties() {
+            return new CircuitBreakerProperties();
+        }
+
+        @Bean
         @ConditionalOnProperty(prefix = "settings.database.circuit-breaker", name = "enabled", havingValue = "true")
         CircuitBreakerSecuredJdbcClient circuitBreakerSecuredJdbcClient(
                 Vertx vertx, JDBCClient vertxJdbcClient, Metrics metrics, Clock clock, ContextRunner contextRunner,
-                @Value("${settings.database.circuit-breaker.opening-threshold}") int openingThreshold,
-                @Value("${settings.database.circuit-breaker.opening-interval-ms}") long openingIntervalMs,
-                @Value("${settings.database.circuit-breaker.closing-interval-ms}") long closingIntervalMs) {
+                @Qualifier("databaseCircuitBreakerProperties") CircuitBreakerProperties circuitBreakerProperties) {
 
             final JdbcClient jdbcClient = createBasicJdbcClient(vertx, vertxJdbcClient, metrics, clock, contextRunner);
-            return new CircuitBreakerSecuredJdbcClient(vertx, jdbcClient, metrics, openingThreshold, openingIntervalMs,
-                    closingIntervalMs);
+            return new CircuitBreakerSecuredJdbcClient(vertx, jdbcClient, metrics,
+                    circuitBreakerProperties.getOpeningThreshold(), circuitBreakerProperties.getOpeningIntervalMs(),
+                    circuitBreakerProperties.getClosingIntervalMs(), clock);
         }
 
         private static BasicJdbcClient createBasicJdbcClient(
                 Vertx vertx, JDBCClient vertxJdbcClient, Metrics metrics, Clock clock, ContextRunner contextRunner) {
             final BasicJdbcClient basicJdbcClient = new BasicJdbcClient(vertx, vertxJdbcClient, metrics, clock);
 
-            contextRunner.runOnServiceContext(
-                    future -> basicJdbcClient.initialize().compose(ignored -> future.complete(), future));
+            contextRunner.<Void>runOnServiceContext(promise -> basicJdbcClient.initialize().setHandler(promise));
 
             return basicJdbcClient;
         }
@@ -167,10 +180,12 @@ public class SettingsConfiguration {
         @Bean
         HttpApplicationSettings httpApplicationSettings(
                 HttpClient httpClient,
+                JacksonMapper mapper,
                 @Value("${settings.http.endpoint}") String endpoint,
-                @Value("${settings.http.amp-endpoint}") String ampEndpoint) {
+                @Value("${settings.http.amp-endpoint}") String ampEndpoint,
+                @Value("${settings.http.video-endpoint}") String videoEndpoint) {
 
-            return new HttpApplicationSettings(httpClient, endpoint, ampEndpoint);
+            return new HttpApplicationSettings(httpClient, mapper, endpoint, ampEndpoint, videoEndpoint);
         }
     }
 
@@ -194,18 +209,62 @@ public class SettingsConfiguration {
         @Bean
         public HttpPeriodicRefreshService httpPeriodicRefreshService(
                 @Value("${settings.in-memory-cache.http-update.endpoint}") String endpoint,
-                SettingsCache settingsCache) {
+                SettingsCache settingsCache,
+                JacksonMapper mapper) {
 
-            return new HttpPeriodicRefreshService(settingsCache, endpoint, refreshPeriod, timeout, vertx, httpClient);
+            return new HttpPeriodicRefreshService(
+                    endpoint, refreshPeriod, timeout, settingsCache, vertx, httpClient, mapper);
         }
 
         @Bean
         public HttpPeriodicRefreshService ampHttpPeriodicRefreshService(
                 @Value("${settings.in-memory-cache.http-update.amp-endpoint}") String ampEndpoint,
-                SettingsCache ampSettingsCache) {
+                SettingsCache ampSettingsCache,
+                JacksonMapper mapper) {
 
-            return new HttpPeriodicRefreshService(ampSettingsCache, ampEndpoint, refreshPeriod, timeout, vertx,
-                    httpClient);
+            return new HttpPeriodicRefreshService(
+                    ampEndpoint, refreshPeriod, timeout, ampSettingsCache, vertx, httpClient, mapper);
+        }
+    }
+
+    @Configuration
+    @ConditionalOnProperty(prefix = "settings.in-memory-cache.jdbc-update",
+            name = {"refresh-rate", "timeout", "init-query", "update-query", "amp-init-query", "amp-update-query"})
+    static class JdbcPeriodicRefreshServiceConfiguration {
+
+        @Value("${settings.in-memory-cache.jdbc-update.refresh-rate}")
+        long refreshPeriod;
+
+        @Value("${settings.in-memory-cache.jdbc-update.timeout}")
+        long timeout;
+
+        @Autowired
+        Vertx vertx;
+
+        @Autowired
+        JdbcClient jdbcClient;
+
+        @Autowired
+        TimeoutFactory timeoutFactory;
+
+        @Bean
+        public JdbcPeriodicRefreshService jdbcPeriodicRefreshService(
+                SettingsCache settingsCache,
+                @Value("${settings.in-memory-cache.jdbc-update.init-query}") String initQuery,
+                @Value("${settings.in-memory-cache.jdbc-update.update-query}") String updateQuery) {
+
+            return new JdbcPeriodicRefreshService(settingsCache, vertx, jdbcClient, refreshPeriod,
+                    initQuery, updateQuery, timeoutFactory, timeout);
+        }
+
+        @Bean
+        public JdbcPeriodicRefreshService ampJdbcPeriodicRefreshService(
+                SettingsCache settingsCache,
+                @Value("${settings.in-memory-cache.jdbc-update.amp-init-query}") String ampInitQuery,
+                @Value("${settings.in-memory-cache.jdbc-update.amp-update-query}") String ampUpdateQuery) {
+
+            return new JdbcPeriodicRefreshService(settingsCache, vertx, jdbcClient, refreshPeriod,
+                    ampInitQuery, ampUpdateQuery, timeoutFactory, timeout);
         }
     }
 
@@ -241,12 +300,14 @@ public class SettingsConfiguration {
                 CompositeApplicationSettings compositeApplicationSettings,
                 ApplicationSettingsCacheProperties cacheProperties,
                 @Qualifier("settingsCache") SettingsCache cache,
-                @Qualifier("ampSettingsCache") SettingsCache ampCache) {
+                @Qualifier("ampSettingsCache") SettingsCache ampCache,
+                @Qualifier("videoSettingCache") SettingsCache videoCache) {
 
             return new CachingApplicationSettings(
                     compositeApplicationSettings,
                     cache,
                     ampCache,
+                    videoCache,
                     cacheProperties.getTtlSeconds(),
                     cacheProperties.getCacheSize());
         }
@@ -259,7 +320,7 @@ public class SettingsConfiguration {
         ApplicationSettings applicationSettings(
                 @Autowired(required = false) CachingApplicationSettings cachingApplicationSettings,
                 @Autowired(required = false) CompositeApplicationSettings compositeApplicationSettings) {
-            return ObjectUtils.firstNonNull(cachingApplicationSettings, compositeApplicationSettings);
+            return ObjectUtils.defaultIfNull(cachingApplicationSettings, compositeApplicationSettings);
         }
     }
 
@@ -276,6 +337,12 @@ public class SettingsConfiguration {
         @Bean
         @Qualifier("ampSettingsCache")
         SettingsCache ampSettingsCache(ApplicationSettingsCacheProperties cacheProperties) {
+            return new SettingsCache(cacheProperties.getTtlSeconds(), cacheProperties.getCacheSize());
+        }
+
+        @Bean
+        @Qualifier("videoSettingCache")
+        SettingsCache videoSettingCache(ApplicationSettingsCacheProperties cacheProperties) {
             return new SettingsCache(cacheProperties.getTtlSeconds(), cacheProperties.getCacheSize());
         }
     }

@@ -17,8 +17,11 @@ import org.mockito.junit.MockitoRule;
 import org.prebid.server.geolocation.model.GeoInfo;
 import org.prebid.server.metric.Metrics;
 
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneId;
+
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatNullPointerException;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.BDDMockito.given;
@@ -32,6 +35,8 @@ public class CircuitBreakerSecuredGeoLocationServiceTest {
     public final MockitoRule mockitoRule = MockitoJUnit.rule();
 
     private Vertx vertx;
+
+    private Clock clock;
     @Mock
     private GeoLocationService wrappedGeoLocationService;
     @Mock
@@ -42,8 +47,9 @@ public class CircuitBreakerSecuredGeoLocationServiceTest {
     @Before
     public void setUp() {
         vertx = Vertx.vertx();
+        clock = Clock.fixed(Instant.now(), ZoneId.systemDefault());
         geoLocationService = new CircuitBreakerSecuredGeoLocationService(vertx, wrappedGeoLocationService, metrics, 1,
-                100L, 200L);
+                100L, 200L, clock);
     }
 
     @After
@@ -52,19 +58,10 @@ public class CircuitBreakerSecuredGeoLocationServiceTest {
     }
 
     @Test
-    public void creationShouldFailOnNullArguments() {
-        assertThatNullPointerException().isThrownBy(
-                () -> new CircuitBreakerSecuredGeoLocationService(null, null, null, 0, 0L, 0L));
-        assertThatNullPointerException().isThrownBy(
-                () -> new CircuitBreakerSecuredGeoLocationService(vertx, null, null, 0, 0L, 0L));
-        assertThatNullPointerException().isThrownBy(
-                () -> new CircuitBreakerSecuredGeoLocationService(vertx, wrappedGeoLocationService, null, 0, 0L, 0L));
-    }
-
-    @Test
     public void lookupShouldSucceedsIfCircuitIsClosedAndWrappedGeoLocationSucceeds(TestContext context) {
         // given
-        givenWrappedGeoLocationReturning(Future.succeededFuture(GeoInfo.of("country")));
+        givenWrappedGeoLocationReturning(
+                Future.succeededFuture(GeoInfo.builder().vendor("vendor").country("country").build()));
 
         // when
         final Future<GeoInfo> future = doLookup(context);
@@ -130,7 +127,7 @@ public class CircuitBreakerSecuredGeoLocationServiceTest {
         // given
         givenWrappedGeoLocationReturning(
                 Future.failedFuture(new RuntimeException("exception")),
-                Future.succeededFuture(GeoInfo.of("country")));
+                Future.succeededFuture(GeoInfo.builder().vendor("vendor").country("country").build()));
 
         // when
         doLookup(context); // 1 call
@@ -149,7 +146,7 @@ public class CircuitBreakerSecuredGeoLocationServiceTest {
     public void lookupShouldFailsWithOriginalExceptionIfOpeningIntervalExceeds(TestContext context) {
         // given
         geoLocationService = new CircuitBreakerSecuredGeoLocationService(vertx, wrappedGeoLocationService, metrics, 2,
-                100L, 200L);
+                100L, 200L, clock);
 
         givenWrappedGeoLocationReturning(
                 Future.failedFuture(new RuntimeException("exception1")),
@@ -187,7 +184,7 @@ public class CircuitBreakerSecuredGeoLocationServiceTest {
         // given
         givenWrappedGeoLocationReturning(
                 Future.failedFuture(new RuntimeException("exception")),
-                Future.succeededFuture(GeoInfo.of("country")));
+                Future.succeededFuture(GeoInfo.builder().vendor("vendor").country("country").build()));
 
         // when
         doLookup(context); // 1 call
@@ -218,11 +215,11 @@ public class CircuitBreakerSecuredGeoLocationServiceTest {
     }
 
     private void doWaitForOpeningInterval(TestContext context) {
-        doWait(context, 200L);
+        doWait(context, 150L);
     }
 
     private void doWaitForClosingInterval(TestContext context) {
-        doWait(context, 300L);
+        doWait(context, 250L);
     }
 
     private void doWait(TestContext context, long timeout) {

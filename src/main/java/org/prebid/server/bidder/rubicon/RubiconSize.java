@@ -56,10 +56,12 @@ final class RubiconSize {
         SIZES.put(size(480, 320), 101);
         SIZES.put(size(768, 1024), 102);
         SIZES.put(size(480, 280), 103);
+        SIZES.put(size(320, 240), 108);
         SIZES.put(size(1000, 300), 113);
         SIZES.put(size(320, 100), 117);
         SIZES.put(size(800, 250), 125);
         SIZES.put(size(200, 600), 126);
+        SIZES.put(size(640, 320), 156);
     }
 
     private final Integer w;
@@ -78,6 +80,9 @@ final class RubiconSize {
         return SIZES.getOrDefault(size(size.getW(), size.getH()), 0);
     }
 
+    /**
+     * Returns {@link Format}s corresponding to the given size IDs or empty if no one matched.
+     */
     static List<Format> idToSize(List<Integer> sizeIds) {
         final List<Format> result = new ArrayList<>();
         for (Integer id : sizeIds) {

@@ -1,9 +1,13 @@
 package org.prebid.server.settings;
 
 import io.vertx.core.Future;
+import io.vertx.core.logging.Logger;
+import io.vertx.core.logging.LoggerFactory;
+import org.prebid.server.exception.PreBidException;
 import org.prebid.server.execution.Timeout;
 import org.prebid.server.settings.model.Account;
 import org.prebid.server.settings.model.StoredDataResult;
+import org.prebid.server.settings.model.StoredResponseDataResult;
 import org.prebid.server.settings.model.TriFunction;
 
 import java.util.Collections;
@@ -19,23 +23,29 @@ import java.util.function.BiFunction;
  */
 public class CachingApplicationSettings implements ApplicationSettings {
 
+    private static final Logger logger = LoggerFactory.getLogger(CachingApplicationSettings.class);
+
     private final ApplicationSettings delegate;
 
     private final Map<String, Account> accountCache;
+    private final Map<String, String> accountToErrorCache;
     private final Map<String, String> adUnitConfigCache;
     private final SettingsCache cache;
     private final SettingsCache ampCache;
+    private final SettingsCache videoCache;
 
     public CachingApplicationSettings(ApplicationSettings delegate, SettingsCache cache, SettingsCache ampCache,
-                                      int ttl, int size) {
+                                      SettingsCache videoCache, int ttl, int size) {
         if (ttl <= 0 || size <= 0) {
             throw new IllegalArgumentException("ttl and size must be positive");
         }
         this.delegate = Objects.requireNonNull(delegate);
         this.accountCache = SettingsCache.createCache(ttl, size);
+        this.accountToErrorCache = SettingsCache.createCache(ttl, size);
         this.adUnitConfigCache = SettingsCache.createCache(ttl, size);
         this.cache = Objects.requireNonNull(cache);
         this.ampCache = Objects.requireNonNull(ampCache);
+        this.videoCache = Objects.requireNonNull(videoCache);
     }
 
     /**
@@ -43,7 +53,7 @@ public class CachingApplicationSettings implements ApplicationSettings {
      */
     @Override
     public Future<Account> getAccountById(String accountId, Timeout timeout) {
-        return getFromCacheOrDelegate(accountCache, accountId, timeout, delegate::getAccountById);
+        return getFromCacheOrDelegate(accountCache, accountToErrorCache, accountId, timeout, delegate::getAccountById);
     }
 
     /**
@@ -51,7 +61,8 @@ public class CachingApplicationSettings implements ApplicationSettings {
      */
     @Override
     public Future<String> getAdUnitConfigById(String adUnitConfigId, Timeout timeout) {
-        return getFromCacheOrDelegate(adUnitConfigCache, adUnitConfigId, timeout, delegate::getAdUnitConfigById);
+        return getFromCacheOrDelegate(adUnitConfigCache, accountToErrorCache, adUnitConfigId, timeout,
+                delegate::getAdUnitConfigById);
     }
 
     /**
@@ -63,6 +74,14 @@ public class CachingApplicationSettings implements ApplicationSettings {
     }
 
     /**
+     * Delegates stored response retrieve to original fetcher, as caching is not supported fot stored response.
+     */
+    @Override
+    public Future<StoredResponseDataResult> getStoredResponses(Set<String> responseIds, Timeout timeout) {
+        return delegate.getStoredResponses(responseIds, timeout);
+    }
+
+    /**
      * Retrieves amp stored data from cache or delegates it to original fetcher.
      */
     @Override
@@ -70,22 +89,31 @@ public class CachingApplicationSettings implements ApplicationSettings {
         return getFromCacheOrDelegate(ampCache, requestIds, impIds, timeout, delegate::getAmpStoredData);
     }
 
-    private static <T> Future<T> getFromCacheOrDelegate(Map<String, T> cache, String key, Timeout timeout,
+    @Override
+    public Future<StoredDataResult> getVideoStoredData(Set<String> requestIds, Set<String> impIds, Timeout timeout) {
+        return getFromCacheOrDelegate(videoCache, requestIds, impIds, timeout, delegate::getVideoStoredData);
+    }
+
+    private static <T> Future<T> getFromCacheOrDelegate(Map<String, T> cache, Map<String, String> accountToErrorCache,
+                                                        String key, Timeout timeout,
                                                         BiFunction<String, Timeout, Future<T>> retriever) {
-        final Future<T> result;
 
         final T cachedValue = cache.get(key);
         if (cachedValue != null) {
-            result = Future.succeededFuture(cachedValue);
-        } else {
-            result = retriever.apply(key, timeout)
-                    .map(value -> {
-                        cache.put(key, value);
-                        return value;
-                    });
+            return Future.succeededFuture(cachedValue);
         }
 
-        return result;
+        final String preBidExceptionMessage = accountToErrorCache.get(key);
+        if (preBidExceptionMessage != null) {
+            return Future.failedFuture(new PreBidException(preBidExceptionMessage));
+        }
+
+        return retriever.apply(key, timeout)
+                .map(value -> {
+                    cache.put(key, value);
+                    return value;
+                })
+                .recover(throwable -> cacheAndReturnFailedFuture(throwable, key, accountToErrorCache));
     }
 
     /**
@@ -127,6 +155,14 @@ public class CachingApplicationSettings implements ApplicationSettings {
         });
     }
 
+    private static <T> Future<T> cacheAndReturnFailedFuture(Throwable throwable, String key,
+                                                            Map<String, String> cache) {
+        if (throwable instanceof PreBidException) {
+            cache.put(key, throwable.getMessage());
+        }
+        return Future.failedFuture(throwable);
+    }
+
     private static Map<String, String> getFromCacheOrAddMissedIds(Set<String> ids, Map<String, String> cache,
                                                                   Set<String> missedIds) {
         final Map<String, String> storedIdToJson = new HashMap<>(ids.size());
@@ -139,5 +175,10 @@ public class CachingApplicationSettings implements ApplicationSettings {
             }
         }
         return storedIdToJson;
+    }
+
+    public void invalidateAccountCache(String accountId) {
+        accountCache.remove(accountId);
+        logger.debug("Account with id {0} was invalidated", accountId);
     }
 }

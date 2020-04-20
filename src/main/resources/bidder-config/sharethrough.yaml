@@ -1,0 +1,24 @@
+adapters:
+  sharethrough:
+    enabled: false
+    endpoint: http://btlr.sharethrough.com/FGMrCMMc/v1
+    pbs-enforces-gdpr: true
+    modifying-vast-xml-allowed: true
+    deprecated-names:
+    aliases:
+    meta-info:
+      maintainer-email: pubgrowth.engineering@sharethrough.com
+      app-media-types:
+        - banner
+        - native
+      site-media-types:
+        - native
+        - banner
+      supported-vendors:
+      vendor-id: 80
+    usersync:
+      url: https://match.sharethrough.com/FGMrCMMc/v1?redirectUri=
+      redirect-url: /setuid?bidder=sharethrough&gdpr={{gdpr}}&gdpr_consent={{gdpr_consent}}&us_privacy={{us_privacy}}&uid=$UID
+      cookie-family-name: sharethrough
+      type: redirect
+      support-cors: false

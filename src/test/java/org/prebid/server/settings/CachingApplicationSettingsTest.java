@@ -13,15 +13,26 @@ import org.prebid.server.execution.Timeout;
 import org.prebid.server.execution.TimeoutFactory;
 import org.prebid.server.settings.model.Account;
 import org.prebid.server.settings.model.StoredDataResult;
+import org.prebid.server.settings.model.StoredResponseDataResult;
 
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneId;
 
-import static java.util.Collections.*;
+import static java.util.Collections.emptyList;
+import static java.util.Collections.emptyMap;
+import static java.util.Collections.emptySet;
+import static java.util.Collections.singleton;
+import static java.util.Collections.singletonList;
+import static java.util.Collections.singletonMap;
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.ArgumentMatchers.*;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anySet;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.same;
 import static org.mockito.BDDMockito.given;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 
@@ -42,14 +53,15 @@ public class CachingApplicationSettingsTest {
         timeout = new TimeoutFactory(Clock.fixed(Instant.now(), ZoneId.systemDefault())).create(500L);
 
         cachingApplicationSettings = new CachingApplicationSettings(applicationSettings, new SettingsCache(360, 100),
-                new SettingsCache(360, 100), 360, 100);
+                new SettingsCache(360, 100), new SettingsCache(360, 100), 360, 100);
     }
 
     @Test
     public void getAccountByIdShouldReturnResultFromCacheOnSuccessiveCalls() {
         // given
+        final Account account = Account.builder().id("accountId").priceGranularity("med").build();
         given(applicationSettings.getAccountById(eq("accountId"), same(timeout)))
-                .willReturn(Future.succeededFuture(Account.of("accountId", "med")));
+                .willReturn(Future.succeededFuture(account));
 
         // when
         final Future<Account> future = cachingApplicationSettings.getAccountById("accountId", timeout);
@@ -57,7 +69,7 @@ public class CachingApplicationSettingsTest {
 
         // then
         assertThat(future.succeeded()).isTrue();
-        assertThat(future.result()).isEqualTo(Account.of("accountId", "med"));
+        assertThat(future.result()).isSameAs(account);
         verify(applicationSettings).getAccountById(eq("accountId"), same(timeout));
         verifyNoMoreInteractions(applicationSettings);
     }
@@ -76,6 +88,47 @@ public class CachingApplicationSettingsTest {
         assertThat(future.failed()).isTrue();
         assertThat(future.cause())
                 .isInstanceOf(PreBidException.class)
+                .hasMessage("error");
+    }
+
+    @Test
+    public void getAccountByIdShouldCachePreBidException() {
+        // given
+        given(applicationSettings.getAccountById(anyString(), any()))
+                .willReturn(Future.failedFuture(new PreBidException("error")));
+
+        // when
+        cachingApplicationSettings.getAccountById("accountId", timeout);
+        cachingApplicationSettings.getAccountById("accountId", timeout);
+        cachingApplicationSettings.getAccountById("accountId", timeout);
+        final Future<Account> lastFuture = cachingApplicationSettings
+                .getAccountById("accountId", timeout);
+
+        // then
+        verify(applicationSettings).getAccountById(anyString(), any());
+        assertThat(lastFuture.failed()).isTrue();
+        assertThat(lastFuture.cause())
+                .isInstanceOf(PreBidException.class)
+                .hasMessage("error");
+    }
+
+    @Test
+    public void getAccountByIdShouldNotCacheNotPreBidException() {
+        // given
+        given(applicationSettings.getAccountById(anyString(), any()))
+                .willReturn(Future.failedFuture(new InvalidRequestException("error")));
+
+        // when
+        cachingApplicationSettings.getAccountById("accountId", timeout);
+        cachingApplicationSettings.getAccountById("accountId", timeout);
+        final Future<Account> lastFuture = cachingApplicationSettings
+                .getAccountById("accountId", timeout);
+
+        // then
+        verify(applicationSettings, times(3)).getAccountById(anyString(), any());
+        assertThat(lastFuture.failed()).isTrue();
+        assertThat(lastFuture.cause())
+                .isInstanceOf(InvalidRequestException.class)
                 .hasMessage("error");
     }
 
@@ -110,6 +163,48 @@ public class CachingApplicationSettingsTest {
         assertThat(future.failed()).isTrue();
         assertThat(future.cause())
                 .isInstanceOf(PreBidException.class)
+                .hasMessage("error");
+    }
+
+    @Test
+    public void getAdUnitConfigByIdShouldCachePreBidException() {
+        // given
+        given(applicationSettings.getAdUnitConfigById(anyString(), any()))
+                .willReturn(Future.failedFuture(new PreBidException("error")));
+
+        // when
+        cachingApplicationSettings.getAdUnitConfigById("adUnitConfigId", timeout);
+        cachingApplicationSettings.getAdUnitConfigById("adUnitConfigId", timeout);
+        cachingApplicationSettings.getAdUnitConfigById("adUnitConfigId", timeout);
+        final Future<String> lastFuture =
+                cachingApplicationSettings.getAdUnitConfigById("adUnitConfigId", timeout);
+
+        // then
+        verify(applicationSettings).getAdUnitConfigById(anyString(), any());
+        assertThat(lastFuture.failed()).isTrue();
+        assertThat(lastFuture.cause())
+                .isInstanceOf(PreBidException.class)
+                .hasMessage("error");
+    }
+
+    @Test
+    public void getAdUnitConfigByIdShouldNotCacheNotPreBidException() {
+        // given
+        given(applicationSettings.getAdUnitConfigById(anyString(), any()))
+                .willReturn(Future.failedFuture(new InvalidRequestException("error")));
+
+        // when
+
+        cachingApplicationSettings.getAdUnitConfigById("adUnitConfigId", timeout);
+        cachingApplicationSettings.getAdUnitConfigById("adUnitConfigId", timeout);
+        final Future<String> lastFuture =
+                cachingApplicationSettings.getAdUnitConfigById("adUnitConfigId", timeout);
+
+        // then
+        verify(applicationSettings, times(3)).getAdUnitConfigById(anyString(), any());
+        assertThat(lastFuture.failed()).isTrue();
+        assertThat(lastFuture.cause())
+                .isInstanceOf(InvalidRequestException.class)
                 .hasMessage("error");
     }
 
@@ -165,5 +260,22 @@ public class CachingApplicationSettingsTest {
         assertThat(future.succeeded()).isTrue();
         assertThat(future.result())
                 .isEqualTo(StoredDataResult.of(emptyMap(), emptyMap(), singletonList("error")));
+    }
+
+    @Test
+    public void getStoredResponseShouldPropagateFailure() {
+        // given
+        given(applicationSettings.getStoredResponses(anySet(), any()))
+                .willReturn(Future.failedFuture(new InvalidRequestException("error")));
+
+        // when
+        final Future<StoredResponseDataResult> future = cachingApplicationSettings
+                .getStoredResponses(singleton("id"), timeout);
+
+        // then
+        assertThat(future.failed()).isTrue();
+        assertThat(future.cause())
+                .isInstanceOf(InvalidRequestException.class)
+                .hasMessage("error");
     }
 }

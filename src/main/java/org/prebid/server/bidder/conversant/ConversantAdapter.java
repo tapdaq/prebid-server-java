@@ -1,6 +1,7 @@
 package org.prebid.server.bidder.conversant;
 
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.iab.openrtb.request.App;
 import com.iab.openrtb.request.Banner;
 import com.iab.openrtb.request.BidRequest;
 import com.iab.openrtb.request.Imp;
@@ -8,7 +9,6 @@ import com.iab.openrtb.request.Site;
 import com.iab.openrtb.request.Video;
 import com.iab.openrtb.response.BidResponse;
 import io.vertx.core.http.HttpMethod;
-import io.vertx.core.json.Json;
 import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.prebid.server.auction.model.AdUnitBid;
@@ -16,12 +16,12 @@ import org.prebid.server.auction.model.AdapterRequest;
 import org.prebid.server.auction.model.PreBidRequestContext;
 import org.prebid.server.bidder.Adapter;
 import org.prebid.server.bidder.OpenrtbAdapter;
-import org.prebid.server.bidder.Usersyncer;
 import org.prebid.server.bidder.conversant.proto.ConversantParams;
 import org.prebid.server.bidder.model.AdUnitBidWithParams;
 import org.prebid.server.bidder.model.AdapterHttpRequest;
 import org.prebid.server.bidder.model.ExchangeCall;
 import org.prebid.server.exception.PreBidException;
+import org.prebid.server.json.JacksonMapper;
 import org.prebid.server.proto.request.PreBidRequest;
 import org.prebid.server.proto.response.Bid;
 import org.prebid.server.proto.response.MediaType;
@@ -55,10 +55,12 @@ public class ConversantAdapter extends OpenrtbAdapter {
     private static final Set<Integer> AD_POSITIONS = IntStream.range(0, 8).boxed().collect(Collectors.toSet());
 
     private final String endpointUrl;
+    private final JacksonMapper mapper;
 
-    public ConversantAdapter(Usersyncer usersyncer, String endpointUrl) {
-        super(usersyncer);
+    public ConversantAdapter(String cookieFamilyName, String endpointUrl, JacksonMapper mapper) {
+        super(cookieFamilyName);
         this.endpointUrl = HttpUtil.validateUrl(Objects.requireNonNull(endpointUrl));
+        this.mapper = Objects.requireNonNull(mapper);
     }
 
     @Override
@@ -75,23 +77,20 @@ public class ConversantAdapter extends OpenrtbAdapter {
 
         validateAdUnitBidsMediaTypes(adUnitBids, ALLOWED_MEDIA_TYPES);
 
-        final List<AdUnitBidWithParams<ConversantParams>> adUnitBidsWithParams = createAdUnitBidsWithParams(adUnitBids);
+        final PreBidRequest preBidRequest = preBidRequestContext.getPreBidRequest();
+        final App app = preBidRequest.getApp();
+        final List<AdUnitBidWithParams<ConversantParams>> adUnitBidsWithParams = createAdUnitBidsWithParams(adUnitBids,
+                app);
         final List<Imp> imps = makeImps(adUnitBidsWithParams, preBidRequestContext);
         validateImps(imps);
 
-        final Site site = makeSite(preBidRequestContext, adUnitBidsWithParams);
-        if (site == null) {
-            throw new PreBidException("Conversant doesn't support App requests");
-        }
-
-        final PreBidRequest preBidRequest = preBidRequestContext.getPreBidRequest();
         return BidRequest.builder()
                 .id(preBidRequest.getTid())
                 .at(1)
                 .tmax(preBidRequest.getTimeoutMillis())
                 .imp(imps)
-                .app(preBidRequest.getApp())
-                .site(site)
+                .app(app != null ? makeApp(adUnitBidsWithParams, app) : null)
+                .site(makeSite(preBidRequestContext, adUnitBidsWithParams))
                 .device(deviceBuilder(preBidRequestContext).build())
                 .user(makeUser(preBidRequestContext))
                 .source(makeSource(preBidRequestContext))
@@ -99,13 +98,19 @@ public class ConversantAdapter extends OpenrtbAdapter {
                 .build();
     }
 
-    private static List<AdUnitBidWithParams<ConversantParams>> createAdUnitBidsWithParams(List<AdUnitBid> adUnitBids) {
+    private List<AdUnitBidWithParams<ConversantParams>> createAdUnitBidsWithParams(List<AdUnitBid> adUnitBids,
+                                                                                   App app) {
         return adUnitBids.stream()
-                .map(adUnitBid -> AdUnitBidWithParams.of(adUnitBid, parseAndValidateParams(adUnitBid)))
+                .map(adUnitBid -> AdUnitBidWithParams.of(adUnitBid, parseAndValidateParams(adUnitBid, app)))
                 .collect(Collectors.toList());
     }
 
-    private static ConversantParams parseAndValidateParams(AdUnitBid adUnitBid) {
+    private ConversantParams parseAndValidateParams(AdUnitBid adUnitBid, App app) {
+        final boolean isAppRequest = app != null;
+        if (isAppRequest && StringUtils.isBlank(app.getId())) {
+            throw new PreBidException("Missing app id");
+        }
+
         final ObjectNode paramsNode = adUnitBid.getParams();
         if (paramsNode == null) {
             throw new PreBidException("Conversant params section is missing");
@@ -113,13 +118,13 @@ public class ConversantAdapter extends OpenrtbAdapter {
 
         final ConversantParams params;
         try {
-            params = Json.mapper.convertValue(paramsNode, ConversantParams.class);
+            params = mapper.mapper().convertValue(paramsNode, ConversantParams.class);
         } catch (IllegalArgumentException e) {
             // a weird way to pass parsing exception
             throw new PreBidException(e.getMessage(), e.getCause());
         }
 
-        if (StringUtils.isEmpty(params.getSiteId())) {
+        if (!isAppRequest && StringUtils.isEmpty(params.getSiteId())) {
             throw new PreBidException("Missing site id");
         }
 
@@ -198,6 +203,23 @@ public class ConversantAdapter extends OpenrtbAdapter {
         return bannerBuilder(adUnitBid)
                 .pos(params.getPosition())
                 .build();
+    }
+
+    private static App makeApp(List<AdUnitBidWithParams<ConversantParams>> adUnitBidsWithParams, App app) {
+        final String siteId = adUnitBidsWithParams.stream()
+                .map(AdUnitBidWithParams::getParams)
+                .filter(params -> params != null && StringUtils.isNotEmpty(params.getSiteId()))
+                .map(ConversantParams::getSiteId)
+                .reduce((first, second) -> second)
+                .orElse(null);
+
+        if (StringUtils.isNotBlank(siteId)) {
+            return app.toBuilder()
+                    .id(siteId)
+                    .build();
+        }
+
+        return app;
     }
 
     private static Site makeSite(PreBidRequestContext preBidRequestContext,

@@ -6,7 +6,6 @@ import io.netty.util.AsciiString;
 import io.vertx.core.Future;
 import io.vertx.core.Handler;
 import io.vertx.core.http.CaseInsensitiveHeaders;
-import io.vertx.core.http.HttpHeaders;
 import io.vertx.core.http.HttpServerRequest;
 import io.vertx.core.http.HttpServerResponse;
 import io.vertx.ext.web.RoutingContext;
@@ -28,17 +27,17 @@ import org.prebid.server.auction.model.PreBidRequestContext.PreBidRequestContext
 import org.prebid.server.bidder.Adapter;
 import org.prebid.server.bidder.BidderCatalog;
 import org.prebid.server.bidder.HttpAdapterConnector;
-import org.prebid.server.bidder.MetaInfo;
 import org.prebid.server.bidder.model.BidderError;
 import org.prebid.server.cache.CacheService;
 import org.prebid.server.cache.proto.BidCacheResult;
 import org.prebid.server.exception.PreBidException;
 import org.prebid.server.execution.Timeout;
 import org.prebid.server.execution.TimeoutFactory;
-import org.prebid.server.gdpr.GdprService;
-import org.prebid.server.gdpr.model.GdprResponse;
 import org.prebid.server.metric.MetricName;
 import org.prebid.server.metric.Metrics;
+import org.prebid.server.privacy.PrivacyExtractor;
+import org.prebid.server.privacy.gdpr.GdprService;
+import org.prebid.server.privacy.gdpr.model.GdprResponse;
 import org.prebid.server.proto.request.AdUnit;
 import org.prebid.server.proto.request.PreBidRequest;
 import org.prebid.server.proto.request.PreBidRequest.PreBidRequestBuilder;
@@ -51,6 +50,7 @@ import org.prebid.server.proto.response.PreBidResponse;
 import org.prebid.server.proto.response.UsersyncInfo;
 import org.prebid.server.settings.ApplicationSettings;
 import org.prebid.server.settings.model.Account;
+import org.prebid.server.util.HttpUtil;
 
 import java.io.IOException;
 import java.math.BigDecimal;
@@ -80,7 +80,6 @@ import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.anyBoolean;
 import static org.mockito.Mockito.anyList;
 import static org.mockito.Mockito.anyLong;
-import static org.mockito.Mockito.anyString;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.same;
 import static org.mockito.Mockito.verify;
@@ -114,54 +113,62 @@ public class AuctionHandlerTest extends VertxTest {
     private Clock clock;
     @Mock
     private GdprService gdprService;
+    private PrivacyExtractor privacyExtractor;
 
     private AuctionHandler auctionHandler;
-
     @Mock
     private RoutingContext routingContext;
     @Mock
     private HttpServerRequest httpRequest;
     @Mock
     private HttpServerResponse httpResponse;
-    @Mock
-    private MetaInfo rubiconMetaInfo;
-    @Mock
-    private MetaInfo appnexusMetaInfo;
 
     @Before
     public void setUp() {
         given(applicationSettings.getAccountById(any(), any()))
-                .willReturn(Future.succeededFuture(Account.of(null, null)));
+                .willReturn(Future.succeededFuture(Account.builder().build()));
 
         given(bidderCatalog.isValidAdapterName(eq(RUBICON))).willReturn(true);
         given(bidderCatalog.isValidName(eq(RUBICON))).willReturn(true);
         given(bidderCatalog.isActive(eq(RUBICON))).willReturn(true);
         willReturn(rubiconAdapter).given(bidderCatalog).adapterByName(eq(RUBICON));
-        given(bidderCatalog.metaInfoByName(eq(RUBICON))).willReturn(rubiconMetaInfo);
-        given(rubiconMetaInfo.info()).willReturn(givenBidderInfo(15, false));
+        given(bidderCatalog.bidderInfoByName(eq(RUBICON))).willReturn(givenBidderInfo(15, false));
 
         given(bidderCatalog.isValidAdapterName(eq(APPNEXUS))).willReturn(true);
         given(bidderCatalog.isValidName(eq(APPNEXUS))).willReturn(true);
         given(bidderCatalog.isActive(eq(APPNEXUS))).willReturn(true);
         willReturn(appnexusAdapter).given(bidderCatalog).adapterByName(eq(APPNEXUS));
-        given(bidderCatalog.metaInfoByName(eq(APPNEXUS))).willReturn(appnexusMetaInfo);
-        given(appnexusMetaInfo.info()).willReturn(givenBidderInfo(20, true));
+        given(bidderCatalog.bidderInfoByName(eq(APPNEXUS))).willReturn(givenBidderInfo(20, true));
 
         given(routingContext.request()).willReturn(httpRequest);
         given(routingContext.response()).willReturn(httpResponse);
 
         given(httpRequest.headers()).willReturn(new CaseInsensitiveHeaders());
 
+        given(httpResponse.exceptionHandler(any())).willReturn(httpResponse);
         given(httpResponse.setStatusCode(anyInt())).willReturn(httpResponse);
         given(httpResponse.putHeader(any(CharSequence.class), any(CharSequence.class))).willReturn(httpResponse);
 
         clock = Clock.fixed(Instant.now(), ZoneId.systemDefault());
 
         given(gdprService.resultByVendor(any(), any(), any(), any(), any(), any()))
-                .willReturn(Future.succeededFuture(GdprResponse.of(emptyMap(), null)));
+                .willReturn(Future.succeededFuture(GdprResponse.of(true, emptyMap(), null)));
 
-        auctionHandler = new AuctionHandler(applicationSettings, bidderCatalog, preBidRequestContextFactory,
-                cacheService, metrics, httpAdapterConnector, clock, gdprService, null, false);
+        privacyExtractor = new PrivacyExtractor(jacksonMapper);
+
+        auctionHandler = new AuctionHandler(
+                applicationSettings,
+                bidderCatalog,
+                preBidRequestContextFactory,
+                cacheService,
+                metrics,
+                httpAdapterConnector,
+                clock,
+                gdprService,
+                privacyExtractor,
+                jacksonMapper,
+                null,
+                false);
     }
 
     @Test
@@ -224,7 +231,7 @@ public class AuctionHandlerTest extends VertxTest {
     @Test
     public void shouldRespondWithErrorIfUnexpectedExceptionOccurs() throws IOException {
         // given
-        givenPreBidRequestContextWith1AdUnitAnd1Bid(identity());
+        givenPreBidRequestContextWith1AdUnitAndOneBid(identity());
 
         given(httpAdapterConnector.call(any(), any(), any(), any()))
                 .willReturn(Future.failedFuture(new RuntimeException()));
@@ -252,7 +259,7 @@ public class AuctionHandlerTest extends VertxTest {
 
         given(cacheService.cacheBids(anyList(), any())).willReturn(Future.succeededFuture(singletonList(
                 BidCacheResult.of("0b4f60d1-fb99-4d95-ba6f-30ac90f9a315", "cached_asset_url"))));
-        given(cacheService.getCachedAssetURL(anyString())).willReturn("cached_asset_url");
+        given(cacheService.getCachedAssetURLTemplate()).willReturn("cached_asset_url");
 
         // when
         auctionHandler.handle(routingContext);
@@ -271,7 +278,7 @@ public class AuctionHandlerTest extends VertxTest {
     @Test
     public void shouldNotInteractWithCacheServiceIfRequestHasBidsAndNoCacheMarkupFlag() throws IOException {
         // given
-        givenPreBidRequestContextWith1AdUnitAnd1Bid(identity());
+        givenPreBidRequestContextWith1AdUnitAndOneBid(identity());
 
         givenBidderRespondingWithBids(RUBICON, identity(), "bidId1");
 
@@ -289,7 +296,7 @@ public class AuctionHandlerTest extends VertxTest {
     @Test
     public void shouldNotInteractWithCacheServiceIfRequestHasNoBidsButCacheMarkupFlag() {
         // given
-        givenPreBidRequestContextWith1AdUnitAnd1Bid(builder -> builder.cacheMarkup(1));
+        givenPreBidRequestContextWith1AdUnitAndOneBid(builder -> builder.cacheMarkup(1));
 
         givenBidderRespondingWithBids(RUBICON, identity());
 
@@ -303,7 +310,7 @@ public class AuctionHandlerTest extends VertxTest {
     @Test
     public void shouldRespondWithErrorIfCacheServiceFails() throws IOException {
         // given
-        givenPreBidRequestContextWith1AdUnitAnd1Bid(builder -> builder.cacheMarkup(1));
+        givenPreBidRequestContextWith1AdUnitAndOneBid(builder -> builder.cacheMarkup(1));
 
         givenBidderRespondingWithBids(RUBICON, identity(), "bidId1");
 
@@ -536,8 +543,11 @@ public class AuctionHandlerTest extends VertxTest {
     @Test
     public void shouldIncrementCommonMetrics() {
         // given
-        givenPreBidRequestContextWith1AdUnitAnd1Bid(
-                builder -> builder.adUnits(singletonList(AdUnit.builder().build())).app(App.builder().build()));
+        givenPreBidRequestContextWith1AdUnitAndOneBid(builder -> builder
+                .adUnits(singletonList(AdUnit.builder()
+                        .mediaTypes(singletonList("banner"))
+                        .build()))
+                .app(App.builder().build()));
 
         // simulate calling end handler that is supposed to update request_time timer value
         given(httpResponse.endHandler(any())).willAnswer(inv -> {
@@ -553,6 +563,7 @@ public class AuctionHandlerTest extends VertxTest {
         // then
         verify(metrics).updateRequestTypeMetric(eq(MetricName.legacy), eq(MetricName.ok));
         verify(metrics).updateAppAndNoCookieAndImpsRequestedMetrics(eq(true), anyBoolean(), anyBoolean(), eq(1));
+        verify(metrics).updateImpTypesMetrics(singletonMap("banner", 1L));
         verify(metrics).updateAccountRequestMetrics(eq("accountId"), eq(MetricName.legacy));
         verify(metrics).updateRequestTimeMetric(anyLong());
         verify(metrics).updateAdapterRequestGotbidsMetrics(eq(RUBICON), eq("accountId"));
@@ -561,11 +572,10 @@ public class AuctionHandlerTest extends VertxTest {
         verify(metrics).updateAdapterBidMetrics(eq(RUBICON), eq("accountId"), eq(5670L), eq(false), eq("banner"));
     }
 
-    @SuppressWarnings("unchecked")
     @Test
     public void shouldIncrementNoBidMetrics() {
         // given
-        givenPreBidRequestContextWith1AdUnitAnd1Bid(identity());
+        givenPreBidRequestContextWith1AdUnitAndOneBid(identity());
 
         givenBidderRespondingWithBids(RUBICON, builder -> builder.noBid(true));
 
@@ -581,8 +591,8 @@ public class AuctionHandlerTest extends VertxTest {
         // given
         givenPreBidRequestContext(identity(), builder -> builder.noLiveUids(true));
 
-        httpRequest.headers().add(HttpHeaders.USER_AGENT, "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_11_6) " +
-                "AppleWebKit/601.7.7 (KHTML, like Gecko) Version/9.1.2 Safari/601.7.7");
+        httpRequest.headers().add(HttpUtil.USER_AGENT_HEADER, "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_11_6) "
+                + "AppleWebKit/601.7.7 (KHTML, like Gecko) Version/9.1.2 Safari/601.7.7");
 
         // when
         auctionHandler.handle(routingContext);
@@ -594,7 +604,7 @@ public class AuctionHandlerTest extends VertxTest {
     @Test
     public void shouldIncrementErrorMetricIfRequestBodyHasUnknownAccountId() {
         // given
-        givenPreBidRequestContextWith1AdUnitAnd1Bid(identity());
+        givenPreBidRequestContextWith1AdUnitAndOneBid(identity());
 
         given(applicationSettings.getAccountById(any(), any()))
                 .willReturn(Future.failedFuture(new PreBidException("Not found")));
@@ -622,7 +632,7 @@ public class AuctionHandlerTest extends VertxTest {
     @Test
     public void shouldIncrementErrorMetricIfAdapterReturnsBadInputError() {
         // given
-        givenPreBidRequestContextWith1AdUnitAnd1Bid(identity());
+        givenPreBidRequestContextWith1AdUnitAndOneBid(identity());
 
         givenBidderRespondingWithError(RUBICON, BidderError.badInput("rubicon error"));
 
@@ -636,7 +646,7 @@ public class AuctionHandlerTest extends VertxTest {
     @Test
     public void shouldIncrementErrorMetricIfAdapterReturnsBadServerResponseError() {
         // given
-        givenPreBidRequestContextWith1AdUnitAnd1Bid(identity());
+        givenPreBidRequestContextWith1AdUnitAndOneBid(identity());
 
         givenBidderRespondingWithError(RUBICON, BidderError.badServerResponse("rubicon error"));
 
@@ -650,7 +660,7 @@ public class AuctionHandlerTest extends VertxTest {
     @Test
     public void shouldIncrementErrorMetricIfAdapterReturnsGenericError() {
         // given
-        givenPreBidRequestContextWith1AdUnitAnd1Bid(identity());
+        givenPreBidRequestContextWith1AdUnitAndOneBid(identity());
 
         givenBidderRespondingWithError(RUBICON, BidderError.generic("rubicon error"));
 
@@ -664,7 +674,7 @@ public class AuctionHandlerTest extends VertxTest {
     @Test
     public void shouldIncrementErrorMetricIfAdapterReturnsTimeoutError() {
         // given
-        givenPreBidRequestContextWith1AdUnitAnd1Bid(identity());
+        givenPreBidRequestContextWith1AdUnitAndOneBid(identity());
 
         givenBidderRespondingWithError(RUBICON, BidderError.timeout("time out"));
 
@@ -678,7 +688,7 @@ public class AuctionHandlerTest extends VertxTest {
     @Test
     public void shouldIncrementErrorMetricIfCacheServiceFails() {
         // given
-        givenPreBidRequestContextWith1AdUnitAnd1Bid(builder -> builder.cacheMarkup(1));
+        givenPreBidRequestContextWith1AdUnitAndOneBid(builder -> builder.cacheMarkup(1));
 
         givenBidderRespondingWithBids(RUBICON, identity(), "bidId1");
 
@@ -695,14 +705,14 @@ public class AuctionHandlerTest extends VertxTest {
     @Test
     public void shouldUpdateNetworkErrorMetric() {
         // given
-        givenPreBidRequestContextWith1AdUnitAnd1Bid(identity());
+        givenPreBidRequestContextWith1AdUnitAndOneBid(identity());
 
         givenBidderRespondingWithBids(RUBICON, identity(), "bidId1");
 
         // simulate calling exception handler that is supposed to update networkerr timer value
         given(httpResponse.exceptionHandler(any())).willAnswer(inv -> {
-            ((Handler<Void>) inv.getArgument(0)).handle(null);
-            return null;
+            ((Handler<RuntimeException>) inv.getArgument(0)).handle(new RuntimeException());
+            return httpResponse;
         });
 
         // when
@@ -715,7 +725,7 @@ public class AuctionHandlerTest extends VertxTest {
     @Test
     public void shouldNotUpdateNetworkErrorMetricIfResponseSucceeded() {
         // given
-        givenPreBidRequestContextWith1AdUnitAnd1Bid(identity());
+        givenPreBidRequestContextWith1AdUnitAndOneBid(identity());
 
         givenBidderRespondingWithBids(RUBICON, identity(), "bidId1");
 
@@ -729,7 +739,7 @@ public class AuctionHandlerTest extends VertxTest {
     @Test
     public void shouldUpdateNetworkErrorMetricIfClientClosedConnection() {
         // given
-        givenPreBidRequestContextWith1AdUnitAnd1Bid(identity());
+        givenPreBidRequestContextWith1AdUnitAndOneBid(identity());
 
         givenBidderRespondingWithBids(RUBICON, identity(), "bidId1");
 
@@ -748,7 +758,7 @@ public class AuctionHandlerTest extends VertxTest {
         givenPreBidRequestContextWith2AdUnitsAnd2BidsEach(identity());
 
         given(gdprService.resultByVendor(any(), any(), any(), any(), any(), any()))
-                .willReturn(Future.succeededFuture(GdprResponse.of(singletonMap(1, false), null)));
+                .willReturn(Future.succeededFuture(GdprResponse.of(true, singletonMap(1, false), null)));
 
         given(httpAdapterConnector.call(any(), any(), any(), any()))
                 .willReturn(Future.succeededFuture(AdapterResponse.of(
@@ -778,7 +788,7 @@ public class AuctionHandlerTest extends VertxTest {
         vendorsToGdpr.put(15, true); // Rubicon bidder
         vendorsToGdpr.put(20, false); // Appnexus bidder
         given(gdprService.resultByVendor(any(), any(), any(), any(), any(), any()))
-                .willReturn(Future.succeededFuture(GdprResponse.of(vendorsToGdpr, null)));
+                .willReturn(Future.succeededFuture(GdprResponse.of(true, vendorsToGdpr, null)));
 
         given(httpAdapterConnector.call(any(), any(), any(), any()))
                 .willReturn(Future.succeededFuture(AdapterResponse.of(
@@ -801,13 +811,13 @@ public class AuctionHandlerTest extends VertxTest {
     @Test
     public void shouldRespondWithUsersyncInfoForBiddersButNotForHostVendor() throws IOException {
         // given
-        givenPreBidRequestContextWith1AdUnitAnd1Bid(identity());
+        givenPreBidRequestContextWith1AdUnitAndOneBid(identity());
 
         final Map<Integer, Boolean> vendorsToGdpr = new HashMap<>();
         vendorsToGdpr.put(1, true); // host vendor id from app config
         vendorsToGdpr.put(15, true); // Rubicon bidder
         given(gdprService.resultByVendor(any(), any(), any(), any(), any(), any()))
-                .willReturn(Future.succeededFuture(GdprResponse.of(vendorsToGdpr, null)));
+                .willReturn(Future.succeededFuture(GdprResponse.of(true, vendorsToGdpr, null)));
 
         given(httpAdapterConnector.call(any(), any(), any(), any()))
                 .willReturn(Future.succeededFuture(AdapterResponse.of(
@@ -815,8 +825,17 @@ public class AuctionHandlerTest extends VertxTest {
                                 .usersync(UsersyncInfo.of("url1", "type1", null))
                                 .build(), emptyList(), null)));
 
-        auctionHandler = new AuctionHandler(applicationSettings, bidderCatalog, preBidRequestContextFactory,
-                cacheService, metrics, httpAdapterConnector, clock, gdprService, 1, false);
+        auctionHandler = new AuctionHandler(
+                applicationSettings,
+                bidderCatalog,
+                preBidRequestContextFactory,
+                cacheService,
+                metrics,
+                httpAdapterConnector,
+                clock, gdprService,
+                privacyExtractor, jacksonMapper,
+                1,
+                false);
 
         // when
         auctionHandler.handle(routingContext);
@@ -827,7 +846,7 @@ public class AuctionHandlerTest extends VertxTest {
                 .containsOnly(UsersyncInfo.of("url1", "type1", null));
     }
 
-    private void givenPreBidRequestContextWith1AdUnitAnd1Bid(
+    private void givenPreBidRequestContextWith1AdUnitAndOneBid(
             Function<PreBidRequestBuilder, PreBidRequestBuilder> preBidRequestBuilderCustomizer) {
 
         final List<AdapterRequest> adapterRequests = singletonList(AdapterRequest.of(RUBICON, singletonList(null)));
@@ -862,6 +881,7 @@ public class AuctionHandlerTest extends VertxTest {
         given(preBidRequestContextFactory.fromRequest(any())).willReturn(Future.succeededFuture(preBidRequestContext));
     }
 
+    @SuppressWarnings("SameParameterValue")
     private void givenBidderRespondingWithBids(String bidder, Function<BidderStatusBuilder, BidderStatusBuilder>
             bidderStatusBuilderCustomizer, String... bidIds) {
         given(httpAdapterConnector.call(any(), any(), any(), any()))
@@ -880,6 +900,7 @@ public class AuctionHandlerTest extends VertxTest {
                         null)));
     }
 
+    @SuppressWarnings("SameParameterValue")
     private void givenBidderRespondingWithError(String bidder, BidderError error) {
         given(httpAdapterConnector.call(any(), any(), any(), any()))
                 .willReturn(Future.succeededFuture(AdapterResponse.of(
@@ -894,6 +915,7 @@ public class AuctionHandlerTest extends VertxTest {
     }
 
     private static BidderInfo givenBidderInfo(int gdprVendorId, boolean enforceGdpr) {
-        return new BidderInfo(true, null, null, null, new BidderInfo.GdprInfo(gdprVendorId, enforceGdpr));
+        return new BidderInfo(true, null, null, null,
+                new BidderInfo.GdprInfo(gdprVendorId, enforceGdpr), false);
     }
 }

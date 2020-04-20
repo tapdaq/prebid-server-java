@@ -51,18 +51,24 @@ import java.util.function.Function;
 import java.util.stream.Collectors;
 
 import static java.util.Arrays.asList;
-import static java.util.Collections.*;
+import static java.util.Collections.emptyList;
+import static java.util.Collections.emptySet;
+import static java.util.Collections.singleton;
+import static java.util.Collections.singletonList;
 import static java.util.function.Function.identity;
-import static org.assertj.core.api.Assertions.*;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
+import static org.assertj.core.api.Assertions.assertThatNullPointerException;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.tuple;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.BDDMockito.given;
 
 public class ConversantAdapterTest extends VertxTest {
 
     private static final String BIDDER = "conversant";
+    private static final String COOKIE_FAMILY = BIDDER;
     private static final String ENDPOINT_URL = "http://exchange.org/";
-    private static final String USERSYNC_URL = "//usersync.org/";
-    private static final String EXTERNAL_URL = "http://external.org/";
 
     @Rule
     public final MockitoRule mockitoRule = MockitoJUnit.rule();
@@ -74,7 +80,6 @@ public class ConversantAdapterTest extends VertxTest {
     private PreBidRequestContext preBidRequestContext;
     private ExchangeCall<BidRequest, BidResponse> exchangeCall;
     private ConversantAdapter adapter;
-    private ConversantUsersyncer usersyncer;
 
     @Before
     public void setUp() {
@@ -82,20 +87,19 @@ public class ConversantAdapterTest extends VertxTest {
 
         adapterRequest = givenBidder(identity(), identity());
         preBidRequestContext = givenPreBidRequestContext(identity(), identity());
-        usersyncer = new ConversantUsersyncer(USERSYNC_URL, EXTERNAL_URL);
-        adapter = new ConversantAdapter(usersyncer, ENDPOINT_URL);
+        adapter = new ConversantAdapter(COOKIE_FAMILY, ENDPOINT_URL, jacksonMapper);
     }
 
     @Test
     public void creationShouldFailOnNullArguments() {
-        assertThatNullPointerException().isThrownBy(() -> new ConversantAdapter(null, null));
-        assertThatNullPointerException().isThrownBy(() -> new ConversantAdapter(usersyncer, null));
+        assertThatNullPointerException().isThrownBy(() -> new ConversantAdapter(null, null, jacksonMapper));
+        assertThatNullPointerException().isThrownBy(() -> new ConversantAdapter(COOKIE_FAMILY, null, jacksonMapper));
     }
 
     @Test
     public void creationShouldFailOnInvalidEndpointUrl() {
         assertThatIllegalArgumentException()
-                .isThrownBy(() -> new ConversantAdapter(usersyncer, "invalid_url"))
+                .isThrownBy(() -> new ConversantAdapter(COOKIE_FAMILY, "invalid_url", jacksonMapper))
                 .withMessage("URL supplied is not valid: invalid_url");
     }
 
@@ -311,9 +315,10 @@ public class ConversantAdapterTest extends VertxTest {
                 builder -> builder
                         .timeoutMillis(1500L)
                         .tid("tid1")
-                        .user(User.builder().ext(mapper.valueToTree(ExtUser.of(null, "consent", null))).build())
-                        .regs(Regs.of(0, mapper.valueToTree(ExtRegs.of(1))))
-        );
+                        .user(User.builder()
+                                .ext(mapper.valueToTree(ExtUser.builder().consent("consent").build()))
+                                .build())
+                        .regs(Regs.of(0, mapper.valueToTree(ExtRegs.of(1, null)))));
 
         // when
         final List<AdapterHttpRequest<BidRequest>> httpRequests = adapter.makeHttpRequests(adapterRequest,
@@ -355,9 +360,9 @@ public class ConversantAdapterTest extends VertxTest {
                                 .build())
                         .user(User.builder()
                                 .buyeruid("buyerUid1")
-                                .ext(mapper.valueToTree(ExtUser.of(null, "consent", null)))
+                                .ext(mapper.valueToTree(ExtUser.builder().consent("consent").build()))
                                 .build())
-                        .regs(Regs.of(0, mapper.valueToTree(ExtRegs.of(1))))
+                        .regs(Regs.of(0, mapper.valueToTree(ExtRegs.of(1, null))))
                         .source(Source.builder()
                                 .fd(1)
                                 .tid("tid1")
@@ -366,7 +371,30 @@ public class ConversantAdapterTest extends VertxTest {
     }
 
     @Test
-    public void makeHttpRequestsShouldThrowPrebidExceptionIfAppIsPresentOnRequest() {
+    public void makeHttpRequestsShouldSetAppIdFromParamsSiteId() {
+        // given
+        adapterRequest = givenBidder(
+                identity(),
+                paramsBuilder -> paramsBuilder.siteId("siteId42"));
+        preBidRequestContext = givenPreBidRequestContext(
+                identity(),
+                builder -> builder
+                        .app(App.builder().id("to_be_changed").build()));
+
+        // when
+        final List<AdapterHttpRequest<BidRequest>> httpRequests = adapter.makeHttpRequests(adapterRequest,
+                preBidRequestContext);
+
+        // then
+        assertThat(httpRequests).hasSize(1)
+                .extracting(AdapterHttpRequest::getPayload)
+                .extracting(BidRequest::getApp)
+                .extracting(App::getId)
+                .containsOnly("siteId42");
+    }
+
+    @Test
+    public void makeHttpRequestsShouldThrowPrebidExceptionIfAppHasBlankOrMissingId() {
         // given
         preBidRequestContext = givenPreBidRequestContext(identity(), builder -> builder
                 .app(App.builder().build()));
@@ -374,7 +402,7 @@ public class ConversantAdapterTest extends VertxTest {
         // when and then
         assertThatThrownBy(() -> adapter.makeHttpRequests(adapterRequest, preBidRequestContext))
                 .isExactlyInstanceOf(PreBidException.class)
-                .hasMessage("Conversant doesn't support App requests");
+                .hasMessage("Missing app id");
     }
 
     @Test

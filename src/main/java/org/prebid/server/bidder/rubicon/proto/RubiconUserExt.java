@@ -1,16 +1,24 @@
 package org.prebid.server.bidder.rubicon.proto;
 
-import lombok.AllArgsConstructor;
+import lombok.Builder;
 import lombok.Value;
 import org.prebid.server.proto.openrtb.ext.request.ExtUserDigiTrust;
+import org.prebid.server.proto.openrtb.ext.request.ExtUserEid;
+import org.prebid.server.proto.openrtb.ext.request.rubicon.ExtUserTpIdRubicon;
 
-@AllArgsConstructor(staticName = "of")
+import java.util.List;
+
+@Builder
 @Value
 public class RubiconUserExt {
-
-    RubiconUserExtRp rp;
 
     String consent;
 
     ExtUserDigiTrust digitrust;
+
+    List<ExtUserEid> eids;
+
+    List<ExtUserTpIdRubicon> tpid;
+
+    RubiconUserExtRp rp;
 }

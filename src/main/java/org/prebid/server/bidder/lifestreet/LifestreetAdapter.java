@@ -6,7 +6,6 @@ import com.iab.openrtb.request.BidRequest;
 import com.iab.openrtb.request.Imp;
 import com.iab.openrtb.response.BidResponse;
 import io.vertx.core.http.HttpMethod;
-import io.vertx.core.json.Json;
 import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.prebid.server.auction.model.AdUnitBid;
@@ -14,12 +13,12 @@ import org.prebid.server.auction.model.AdapterRequest;
 import org.prebid.server.auction.model.PreBidRequestContext;
 import org.prebid.server.bidder.Adapter;
 import org.prebid.server.bidder.OpenrtbAdapter;
-import org.prebid.server.bidder.Usersyncer;
 import org.prebid.server.bidder.lifestreet.proto.LifestreetParams;
 import org.prebid.server.bidder.model.AdUnitBidWithParams;
 import org.prebid.server.bidder.model.AdapterHttpRequest;
 import org.prebid.server.bidder.model.ExchangeCall;
 import org.prebid.server.exception.PreBidException;
+import org.prebid.server.json.JacksonMapper;
 import org.prebid.server.proto.request.PreBidRequest;
 import org.prebid.server.proto.response.Bid;
 import org.prebid.server.proto.response.MediaType;
@@ -41,10 +40,12 @@ public class LifestreetAdapter extends OpenrtbAdapter {
             Collections.unmodifiableSet(EnumSet.of(MediaType.banner, MediaType.video));
 
     private final String endpointUrl;
+    private final JacksonMapper mapper;
 
-    public LifestreetAdapter(Usersyncer usersyncer, String endpointUrl) {
-        super(usersyncer);
+    public LifestreetAdapter(String cookieFamilyName, String endpointUrl, JacksonMapper mapper) {
+        super(cookieFamilyName);
         this.endpointUrl = HttpUtil.validateUrl(Objects.requireNonNull(endpointUrl));
+        this.mapper = Objects.requireNonNull(mapper);
     }
 
     @Override
@@ -67,13 +68,13 @@ public class LifestreetAdapter extends OpenrtbAdapter {
                 .collect(Collectors.toList());
     }
 
-    private static List<AdUnitBidWithParams<LifestreetParams>> createAdUnitBidsWithParams(List<AdUnitBid> adUnitBids) {
+    private List<AdUnitBidWithParams<LifestreetParams>> createAdUnitBidsWithParams(List<AdUnitBid> adUnitBids) {
         return adUnitBids.stream()
                 .map(adUnitBid -> AdUnitBidWithParams.of(adUnitBid, parseAndValidateParams(adUnitBid)))
                 .collect(Collectors.toList());
     }
 
-    private static LifestreetParams parseAndValidateParams(AdUnitBid adUnitBid) {
+    private LifestreetParams parseAndValidateParams(AdUnitBid adUnitBid) {
         final ObjectNode paramsNode = adUnitBid.getParams();
         if (paramsNode == null) {
             throw new PreBidException("Lifestreet params section is missing");
@@ -81,7 +82,7 @@ public class LifestreetAdapter extends OpenrtbAdapter {
 
         final LifestreetParams params;
         try {
-            params = Json.mapper.convertValue(paramsNode, LifestreetParams.class);
+            params = mapper.mapper().convertValue(paramsNode, LifestreetParams.class);
         } catch (IllegalArgumentException e) {
             // a weird way to pass parsing exception
             throw new PreBidException(e.getMessage(), e.getCause());

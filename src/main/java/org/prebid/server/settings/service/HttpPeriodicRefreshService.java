@@ -5,15 +5,16 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.vertx.core.Future;
 import io.vertx.core.Vertx;
-import io.vertx.core.json.DecodeException;
-import io.vertx.core.json.Json;
 import io.vertx.core.logging.Logger;
 import io.vertx.core.logging.LoggerFactory;
 import org.prebid.server.exception.PreBidException;
+import org.prebid.server.json.DecodeException;
+import org.prebid.server.json.JacksonMapper;
 import org.prebid.server.settings.CacheNotificationListener;
 import org.prebid.server.settings.model.StoredDataType;
 import org.prebid.server.settings.proto.response.HttpRefreshResponse;
 import org.prebid.server.util.HttpUtil;
+import org.prebid.server.vertx.Initializable;
 import org.prebid.server.vertx.http.HttpClient;
 import org.prebid.server.vertx.http.model.HttpClientResponse;
 
@@ -57,41 +58,50 @@ import java.util.Objects;
  * To signal deletions, the endpoint may return { "deleted": true }
  * in place of the Stored Data if the "last-modified" param existed.
  */
-public class HttpPeriodicRefreshService {
+public class HttpPeriodicRefreshService implements Initializable {
 
     private static final Logger logger = LoggerFactory.getLogger(HttpPeriodicRefreshService.class);
 
-    private final CacheNotificationListener cacheNotificationListener;
     private final String refreshUrl;
     private final long refreshPeriod;
     private final long timeout;
+    private final CacheNotificationListener cacheNotificationListener;
     private final Vertx vertx;
     private final HttpClient httpClient;
+    private final JacksonMapper mapper;
+
     private Instant lastUpdateTime;
 
-    public HttpPeriodicRefreshService(CacheNotificationListener cacheNotificationListener, String refreshUrl,
-                                      long refreshPeriod, long timeout, Vertx vertx, HttpClient httpClient) {
-        this.cacheNotificationListener = Objects.requireNonNull(cacheNotificationListener);
+    public HttpPeriodicRefreshService(String refreshUrl,
+                                      long refreshPeriod,
+                                      long timeout,
+                                      CacheNotificationListener cacheNotificationListener,
+                                      Vertx vertx,
+                                      HttpClient httpClient,
+                                      JacksonMapper mapper) {
+
         this.refreshUrl = HttpUtil.validateUrl(Objects.requireNonNull(refreshUrl));
         this.refreshPeriod = refreshPeriod;
         this.timeout = timeout;
+        this.cacheNotificationListener = Objects.requireNonNull(cacheNotificationListener);
         this.vertx = Objects.requireNonNull(vertx);
         this.httpClient = Objects.requireNonNull(httpClient);
+        this.mapper = Objects.requireNonNull(mapper);
     }
 
+    @Override
     public void initialize() {
+        getAll();
         if (refreshPeriod > 0) {
             vertx.setPeriodic(refreshPeriod, aLong -> refresh());
         }
-        getAll();
     }
 
     private void getAll() {
-        lastUpdateTime = Instant.now();
-
         httpClient.get(refreshUrl, timeout)
-                .map(HttpPeriodicRefreshService::processResponse)
+                .map(this::processResponse)
                 .map(this::save)
+                .map(ignored -> setLastUpdateTime(Instant.now()))
                 .recover(HttpPeriodicRefreshService::failResponse);
     }
 
@@ -104,15 +114,20 @@ public class HttpPeriodicRefreshService {
         return null;
     }
 
+    private Void setLastUpdateTime(Instant instant) {
+        lastUpdateTime = instant;
+        return null;
+    }
+
     /**
      * Handles errors occurred while HTTP request or response processing.
      */
     private static Future<Void> failResponse(Throwable exception) {
-        logger.warn("Error occurred while request to currency service", exception);
+        logger.warn("Error occurred while request to http periodic refresh service", exception);
         return Future.failedFuture(exception);
     }
 
-    private static HttpRefreshResponse processResponse(HttpClientResponse response) {
+    private HttpRefreshResponse processResponse(HttpClientResponse response) {
         final int statusCode = response.getStatusCode();
         if (statusCode != 200) {
             throw new PreBidException(String.format("HTTP status code %d", statusCode));
@@ -121,7 +136,7 @@ public class HttpPeriodicRefreshService {
         final String body = response.getBody();
         final HttpRefreshResponse refreshResponse;
         try {
-            refreshResponse = Json.decodeValue(body, HttpRefreshResponse.class);
+            refreshResponse = mapper.decodeValue(body, HttpRefreshResponse.class);
         } catch (DecodeException e) {
             throw new PreBidException(String.format("Cannot parse response: %s", body), e);
         }
@@ -129,8 +144,8 @@ public class HttpPeriodicRefreshService {
         return refreshResponse;
     }
 
-    private static Map<String, String> parseStoredData(Map<String, ObjectNode> refreshResponse,
-                                                       StoredDataType type) {
+    private Map<String, String> parseStoredData(Map<String, ObjectNode> refreshResponse,
+                                                StoredDataType type) {
         final Map<String, String> result = new HashMap<>();
 
         for (Map.Entry<String, ObjectNode> entry : refreshResponse.entrySet()) {
@@ -138,7 +153,7 @@ public class HttpPeriodicRefreshService {
 
             final String jsonAsString;
             try {
-                jsonAsString = Json.mapper.writeValueAsString(entry.getValue());
+                jsonAsString = mapper.mapper().writeValueAsString(entry.getValue());
             } catch (JsonProcessingException e) {
                 throw new PreBidException(String.format("Error parsing %s json for id: %s with message: %s", type, id,
                         e.getMessage()));
@@ -156,15 +171,14 @@ public class HttpPeriodicRefreshService {
         final String refreshEndpoint = refreshUrl + andOrParam + lastModifiedParam;
 
         httpClient.get(refreshEndpoint, timeout)
-                .map(HttpPeriodicRefreshService::processResponse)
-                .map(this::update)
+                .map(this::processResponse)
+                .map(this::invalidate)
                 .map(this::save)
+                .map(ignored -> setLastUpdateTime(updateTime))
                 .recover(HttpPeriodicRefreshService::failResponse);
-
-        lastUpdateTime = updateTime;
     }
 
-    private HttpRefreshResponse update(HttpRefreshResponse refreshResponse) {
+    private HttpRefreshResponse invalidate(HttpRefreshResponse refreshResponse) {
         final List<String> invalidatedRequests = getInvalidatedKeys(refreshResponse.getRequests());
         final List<String> invalidatedImps = getInvalidatedKeys(refreshResponse.getImps());
 

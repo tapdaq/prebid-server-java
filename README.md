@@ -1,6 +1,12 @@
 ## This code is being used in production by multiple Prebid.org members, but is not the "official" version. See https://github.com/prebid/prebid-server/
 
 # Prebid Server
+[![GitHub version](https://badge.fury.io/gh/rubicon-project%2fprebid-server-java.svg)](http://badge.fury.io/gh/rubicon-project%2fprebid-server-java)
+[![Language grade: Java](https://img.shields.io/lgtm/grade/java/g/rubicon-project/prebid-server-java.svg?logo=lgtm&logoWidth=18)](https://lgtm.com/projects/g/rubicon-project/prebid-server-java/context:java)
+[![Total alerts](https://img.shields.io/lgtm/alerts/g/rubicon-project/prebid-server-java.svg?logo=lgtm&logoWidth=18)](https://lgtm.com/projects/g/rubicon-project/prebid-server-java/alerts/)
+[![GitHub contributors](https://img.shields.io/github/contributors/rubicon-project/prebid-server-java.svg)](https://GitHub.com/rubicon-project/prebid-server-java/contributors/)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/rubicon-project/prebid-server-java/blob/master/docs/contributing.md) 
+[![GitHub pull-requests closed](https://img.shields.io/github/issues-pr-closed/rubicon-project/prebid-server-java.svg)](https://GitHub.com/rubicon-project/prebid-server-java/pull/)
 
 Prebid Server is an open source implementation of Server-Side Header Bidding.
 It is managed by [Prebid.org](http://prebid.org/overview/what-is-prebid-org.html),
@@ -35,41 +41,13 @@ We use [Maven](https://maven.apache.org) and attempt to introduce minimal depend
 
 To start the Prebid Server you need to do the following steps:
 - Build all-in-one JAR file from sources as described [here](docs/build.md).
-- Create minimal needed configuration file `prebid-config.yaml`:
-```yaml
-adapters:
-  rubicon:
-    enabled: true
-    XAPI.Username: user1
-    XAPI.Password: password1
-metrics:
-  prefix: prebid
-cache:
-  scheme: http
-  host: localhost
-  path: /cache
-  query: uuid=%PBS_CACHE_UUID%
-settings:
-  filesystem:
-    settings-filename: sample-app-settings.yml
-    stored-requests-dir: /tmp
-    stored-imps-dir: /tmp
-gdpr:
-  vendorlist:
-    filesystem-cache-dir: /tmp
-status-response: "ok"
-```
-
-Also, create the Data Cache settings file `sample-app-settings.yml` with content:
-```yaml
-accounts:
-  - 1001
-```
+- Check minimal needed configuration file `sample/prebid-config.yaml`.
+- Also, check the Data Cache settings file `sample/sample-app-settings.yaml`.
 For more information how to configure the server follow [documentation](docs/config.md).
 
 - Run your server with the next command:
 ```
-java -jar target/prebid-server.jar --spring.config.location=prebid-config.yaml
+java -jar target/prebid-server.jar --spring.config.additional-location=sample/prebid-config.yaml
 ```
 For more information how to start the server follow [documentation](docs/run.md).
 

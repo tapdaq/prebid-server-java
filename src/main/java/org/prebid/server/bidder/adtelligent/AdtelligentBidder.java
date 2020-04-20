@@ -10,11 +10,7 @@ import com.iab.openrtb.response.BidResponse;
 import com.iab.openrtb.response.SeatBid;
 import io.vertx.core.MultiMap;
 import io.vertx.core.http.HttpMethod;
-import io.vertx.core.json.DecodeException;
-import io.vertx.core.json.EncodeException;
-import io.vertx.core.json.Json;
 import org.prebid.server.bidder.Bidder;
-import org.prebid.server.bidder.BidderUtil;
 import org.prebid.server.bidder.adtelligent.proto.AdtelligentImpExt;
 import org.prebid.server.bidder.model.BidderBid;
 import org.prebid.server.bidder.model.BidderError;
@@ -22,6 +18,9 @@ import org.prebid.server.bidder.model.HttpCall;
 import org.prebid.server.bidder.model.HttpRequest;
 import org.prebid.server.bidder.model.Result;
 import org.prebid.server.exception.PreBidException;
+import org.prebid.server.json.DecodeException;
+import org.prebid.server.json.EncodeException;
+import org.prebid.server.json.JacksonMapper;
 import org.prebid.server.proto.openrtb.ext.ExtPrebid;
 import org.prebid.server.proto.openrtb.ext.request.adtelligent.ExtImpAdtelligent;
 import org.prebid.server.proto.openrtb.ext.response.BidType;
@@ -48,11 +47,14 @@ public class AdtelligentBidder implements Bidder<BidRequest> {
             };
 
     private final String endpointUrl;
+    private final JacksonMapper mapper;
+
     private final MultiMap headers;
 
-    public AdtelligentBidder(String endpointUrl) {
+    public AdtelligentBidder(String endpointUrl, JacksonMapper mapper) {
         this.endpointUrl = HttpUtil.validateUrl(Objects.requireNonNull(endpointUrl));
-        headers = BidderUtil.headers();
+        this.mapper = Objects.requireNonNull(mapper);
+        headers = HttpUtil.headers();
     }
 
     /**
@@ -68,9 +70,9 @@ public class AdtelligentBidder implements Bidder<BidRequest> {
      * Converts response to {@link List} of {@link BidderBid}s with {@link List} of errors.
      */
     @Override
-    public Result<List<BidderBid>> makeBids(HttpCall httpCall, BidRequest bidRequest) {
+    public Result<List<BidderBid>> makeBids(HttpCall<BidRequest> httpCall, BidRequest bidRequest) {
         try {
-            final BidResponse bidResponse = Json.decodeValue(httpCall.getResponse().getBody(), BidResponse.class);
+            final BidResponse bidResponse = mapper.decodeValue(httpCall.getResponse().getBody(), BidResponse.class);
             return extractBids(bidResponse, bidRequest.getImp());
         } catch (DecodeException e) {
             return Result.emptyWithError(BidderError.badServerResponse(e.getMessage()));
@@ -121,10 +123,10 @@ public class AdtelligentBidder implements Bidder<BidRequest> {
             final BidRequest bidRequest = request.toBuilder().imp(sourceIdToImps.getValue()).build();
             final String bidRequestBody;
             try {
-                bidRequestBody = Json.encode(bidRequest);
+                bidRequestBody = mapper.encode(bidRequest);
             } catch (EncodeException e) {
-                errors.add(BidderError.badInput(String.format("error while encoding bidRequest, err: %s",
-                        e.getMessage())));
+                errors.add(BidderError.badInput(
+                        String.format("error while encoding bidRequest, err: %s", e.getMessage())));
                 return Result.of(Collections.emptyList(), errors);
             }
             httpRequests.add(HttpRequest.<BidRequest>builder()
@@ -143,8 +145,7 @@ public class AdtelligentBidder implements Bidder<BidRequest> {
      */
     private ExtImpAdtelligent getExtImpAdtelligent(Imp imp) {
         try {
-            return Json.mapper.<ExtPrebid<?, ExtImpAdtelligent>>convertValue(imp.getExt(),
-                    ADTELLIGENT_EXT_TYPE_REFERENCE).getBidder();
+            return mapper.mapper().convertValue(imp.getExt(), ADTELLIGENT_EXT_TYPE_REFERENCE).getBidder();
         } catch (IllegalArgumentException e) {
             throw new PreBidException(String.format(
                     "ignoring imp id=%s, error while decoding impExt, err: %s", imp.getId(), e.getMessage()));
@@ -175,7 +176,7 @@ public class AdtelligentBidder implements Bidder<BidRequest> {
         final BigDecimal bidFloor = extImpAdtelligent.getBidFloor();
         return imp.toBuilder()
                 .bidfloor(bidFloor != null && bidFloor.compareTo(BigDecimal.ZERO) > 0 ? bidFloor : imp.getBidfloor())
-                .ext(Json.mapper.valueToTree(adtelligentImpExt))
+                .ext(mapper.mapper().valueToTree(adtelligentImpExt))
                 .build();
     }
 

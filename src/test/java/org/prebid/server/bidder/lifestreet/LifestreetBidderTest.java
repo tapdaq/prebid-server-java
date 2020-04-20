@@ -43,12 +43,12 @@ public class LifestreetBidderTest extends VertxTest {
 
     @Before
     public void setUp() {
-        lifestreetBidder = new LifestreetBidder(ENDPOINT_URL);
+        lifestreetBidder = new LifestreetBidder(ENDPOINT_URL, jacksonMapper);
     }
 
     @Test
     public void creationShouldFailOnInvalidEndpointUrl() {
-        assertThatIllegalArgumentException().isThrownBy(() -> new LifestreetBidder("invalid_url"));
+        assertThatIllegalArgumentException().isThrownBy(() -> new LifestreetBidder("invalid_url", jacksonMapper));
     }
 
     @Test
@@ -62,7 +62,8 @@ public class LifestreetBidderTest extends VertxTest {
 
         // then
         assertThat(result.getErrors()).hasSize(1)
-                .containsOnly(BidderError.badInput("Invalid MediaType. Lifestreet supports only Banner and Video. Ignoring ImpID=123"));
+                .containsOnly(BidderError.badInput(
+                        "Invalid MediaType. Lifestreet supports only Banner and Video. Ignoring ImpID=123"));
         assertThat(result.getValue()).isEmpty();
     }
 
@@ -298,14 +299,14 @@ public class LifestreetBidderTest extends VertxTest {
                 .containsOnly(BidderBid.of(Bid.builder().impid("123").build(), video, "USD"));
     }
 
-
     @Test
     public void extractTargetingShouldReturnEmptyMap() {
         assertThat(lifestreetBidder.extractTargeting(mapper.createObjectNode())).isEqualTo(emptyMap());
     }
 
-    private static BidRequest givenBidRequest(Function<BidRequest.BidRequestBuilder, BidRequest.BidRequestBuilder> bidRequestCustomizer,
-                                              Function<Imp.ImpBuilder, Imp.ImpBuilder> impCustomizer) {
+    private static BidRequest givenBidRequest(
+            Function<BidRequest.BidRequestBuilder, BidRequest.BidRequestBuilder> bidRequestCustomizer,
+            Function<Imp.ImpBuilder, Imp.ImpBuilder> impCustomizer) {
         return bidRequestCustomizer.apply(BidRequest.builder()
                 .imp(singletonList(givenImp(impCustomizer))))
                 .build();

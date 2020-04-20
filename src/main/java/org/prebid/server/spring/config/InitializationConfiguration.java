@@ -1,16 +1,15 @@
 package org.prebid.server.spring.config;
 
-import org.prebid.server.currency.CurrencyConversionService;
 import org.prebid.server.metric.Metrics;
-import org.prebid.server.settings.service.HttpPeriodicRefreshService;
 import org.prebid.server.vertx.ContextRunner;
+import org.prebid.server.vertx.Initializable;
 import org.prebid.server.vertx.http.HttpClient;
-import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.event.ContextRefreshedEvent;
 import org.springframework.context.event.EventListener;
+
+import java.util.List;
 
 /**
  * Some services are initialized after context is fully populated to overcome deadlock that may happen due to lazy
@@ -32,35 +31,13 @@ public class InitializationConfiguration {
     private ContextRunner contextRunner;
 
     @Autowired
-    private CurrencyConversionService currencyConversionService;
-
-    @Autowired
-    @Qualifier("httpPeriodicRefreshService")
-    private ObjectProvider<HttpPeriodicRefreshService> httpPeriodicRefreshServiceProvider;
-
-    @Autowired
-    @Qualifier("ampHttpPeriodicRefreshService")
-    private ObjectProvider<HttpPeriodicRefreshService> ampHttpPeriodicRefreshServiceProvider;
+    private List<Initializable> initializables;
 
     @EventListener(ContextRefreshedEvent.class)
     public void initializeServices() {
-
-        final HttpPeriodicRefreshService httpPeriodicRefreshService =
-                httpPeriodicRefreshServiceProvider.getIfAvailable();
-        final HttpPeriodicRefreshService ampHttpPeriodicRefreshService =
-                ampHttpPeriodicRefreshServiceProvider.getIfAvailable();
-
-        contextRunner.runOnServiceContext(future -> {
-            currencyConversionService.initialize();
-
-            if (httpPeriodicRefreshService != null) {
-                httpPeriodicRefreshService.initialize();
-            }
-            if (ampHttpPeriodicRefreshService != null) {
-                ampHttpPeriodicRefreshService.initialize();
-            }
-
-            future.complete();
+        contextRunner.runOnServiceContext(promise -> {
+            initializables.forEach(Initializable::initialize);
+            promise.complete();
         });
     }
 }

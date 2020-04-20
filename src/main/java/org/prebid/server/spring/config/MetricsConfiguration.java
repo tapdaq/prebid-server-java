@@ -19,6 +19,8 @@ import io.vertx.core.logging.LoggerFactory;
 import io.vertx.ext.web.Router;
 import lombok.Data;
 import lombok.NoArgsConstructor;
+import org.apache.commons.lang3.ObjectUtils;
+import org.prebid.server.bidder.BidderCatalog;
 import org.prebid.server.metric.AccountMetricsVerbosity;
 import org.prebid.server.metric.CounterType;
 import org.prebid.server.metric.Metrics;
@@ -41,6 +43,7 @@ import javax.validation.constraints.NotNull;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 @Configuration
@@ -80,7 +83,14 @@ public class MetricsConfiguration {
                 influxdbProperties.getConnectTimeout(),
                 influxdbProperties.getReadTimeout(),
                 influxdbProperties.getPrefix());
-        final ScheduledReporter reporter = InfluxDbReporter.forRegistry(metricRegistry).build(influxDbSender);
+        final Map<String, String> tags = ObjectUtils.defaultIfNull(
+                influxdbProperties.getTags(),
+                Collections.emptyMap()
+        );
+        final ScheduledReporter reporter = InfluxDbReporter
+                .forRegistry(metricRegistry)
+                .withTags(tags)
+                .build(influxDbSender);
         reporter.start(influxdbProperties.getInterval(), TimeUnit.SECONDS);
 
         return reporter;
@@ -97,8 +107,8 @@ public class MetricsConfiguration {
 
     @Bean
     Metrics metrics(@Value("${metrics.metricType}") CounterType counterType, MetricRegistry metricRegistry,
-                    AccountMetricsVerbosity accountMetricsVerbosity) {
-        return new Metrics(metricRegistry, counterType, accountMetricsVerbosity);
+                    AccountMetricsVerbosity accountMetricsVerbosity, BidderCatalog bidderCatalog) {
+        return new Metrics(metricRegistry, counterType, accountMetricsVerbosity, bidderCatalog);
     }
 
     @Bean
@@ -167,6 +177,7 @@ public class MetricsConfiguration {
         @NotNull
         @Min(1)
         private Integer interval;
+        private Map<String, String> tags;
     }
 
     @Component
@@ -220,8 +231,8 @@ public class MetricsConfiguration {
 
             CollectorRegistry.defaultRegistry.register(new DropwizardExports(metricRegistry));
 
-            contextRunner.<HttpServer>runOnServiceContext(future ->
-                    vertx.createHttpServer().requestHandler(router::accept).listen(prometheusPort, future));
+            contextRunner.<HttpServer>runOnServiceContext(promise ->
+                    vertx.createHttpServer().requestHandler(router).listen(prometheusPort, promise));
 
             logger.info("Successfully started Prometheus Server");
         }

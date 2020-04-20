@@ -7,8 +7,6 @@ import io.netty.channel.ConnectTimeoutException;
 import io.netty.handler.codec.http.HttpResponseStatus;
 import io.vertx.core.CompositeFuture;
 import io.vertx.core.Future;
-import io.vertx.core.json.DecodeException;
-import io.vertx.core.json.Json;
 import io.vertx.core.logging.Logger;
 import io.vertx.core.logging.LoggerFactory;
 import org.apache.commons.collections4.CollectionUtils;
@@ -22,12 +20,16 @@ import org.prebid.server.bidder.model.ExchangeCall;
 import org.prebid.server.bidder.model.Result;
 import org.prebid.server.exception.PreBidException;
 import org.prebid.server.execution.Timeout;
-import org.prebid.server.gdpr.GdprUtils;
+import org.prebid.server.json.DecodeException;
+import org.prebid.server.json.JacksonMapper;
+import org.prebid.server.privacy.PrivacyExtractor;
+import org.prebid.server.privacy.model.Privacy;
 import org.prebid.server.proto.request.PreBidRequest;
 import org.prebid.server.proto.response.Bid;
 import org.prebid.server.proto.response.BidderDebug;
 import org.prebid.server.proto.response.BidderStatus;
 import org.prebid.server.proto.response.MediaType;
+import org.prebid.server.proto.response.UsersyncInfo;
 import org.prebid.server.vertx.http.HttpClient;
 import org.prebid.server.vertx.http.model.HttpClientResponse;
 
@@ -52,11 +54,19 @@ public class HttpAdapterConnector {
     private static final Logger logger = LoggerFactory.getLogger(HttpAdapterConnector.class);
 
     private final HttpClient httpClient;
+    private final PrivacyExtractor privacyExtractor;
     private final Clock clock;
+    private final JacksonMapper mapper;
 
-    public HttpAdapterConnector(HttpClient httpClient, Clock clock) {
+    public HttpAdapterConnector(HttpClient httpClient,
+                                PrivacyExtractor privacyExtractor,
+                                Clock clock,
+                                JacksonMapper mapper) {
+
         this.httpClient = Objects.requireNonNull(httpClient);
+        this.privacyExtractor = Objects.requireNonNull(privacyExtractor);
         this.clock = Objects.requireNonNull(clock);
+        this.mapper = Objects.requireNonNull(mapper);
     }
 
     /**
@@ -90,11 +100,11 @@ public class HttpAdapterConnector {
     /**
      * Makes an HTTP request and returns {@link Future} that will be eventually completed with success or error result.
      */
-    private <T, R> Future<ExchangeCall> doRequest(AdapterHttpRequest<T> httpRequest, Timeout timeout,
-                                                  TypeReference<R> typeReference) {
+    private <T, R> Future<ExchangeCall<T, R>> doRequest(AdapterHttpRequest<T> httpRequest, Timeout timeout,
+                                                        TypeReference<R> typeReference) {
         final String uri = httpRequest.getUri();
         final T requestBody = httpRequest.getPayload();
-        final String body = requestBody != null ? Json.encode(requestBody) : null;
+        final String body = requestBody != null ? mapper.encode(requestBody) : null;
         final BidderDebug.BidderDebugBuilder bidderDebugBuilder = beginBidderDebug(uri, body);
 
         final long remainingTimeout = timeout.remaining();
@@ -125,37 +135,37 @@ public class HttpAdapterConnector {
      * Handles request (e.g. read timeout) and response (e.g. connection reset) errors producing
      * {@link ExchangeCall} containing {@link BidderDebug} and error description.
      */
-    private static Future<ExchangeCall> failResponse(Throwable exception,
-                                                     BidderDebug.BidderDebugBuilder bidderDebugBuilder) {
-        logger.warn("Error occurred while sending bid request to an exchange", exception);
-        final BidderDebug bidderDebug = bidderDebugBuilder.build();
+    private static <T, R> Future<ExchangeCall<T, R>> failResponse(Throwable exception,
+                                                                  BidderDebug.BidderDebugBuilder bidderDebugBuilder) {
+        logger.warn("Error occurred while sending bid request to an exchange: {0}", exception.getMessage());
+        logger.debug("Error occurred while sending bid request to an exchange", exception);
 
         final BidderError error = exception instanceof TimeoutException || exception instanceof ConnectTimeoutException
                 ? BidderError.timeout("Timed out")
                 : BidderError.generic(exception.getMessage());
 
-        return Future.succeededFuture(ExchangeCall.error(bidderDebug, error));
+        return Future.succeededFuture(ExchangeCall.error(bidderDebugBuilder.build(), error));
     }
 
     /**
      * Handles {@link HttpClientResponse}, analyzes response status
      * and creates {@link Future} with {@link ExchangeCall} from body content.
      */
-    private static <T, R> Future<ExchangeCall> processResponse(HttpClientResponse response,
-                                                               TypeReference<R> responseTypeReference, T request,
-                                                               BidderDebug.BidderDebugBuilder bidderDebugBuilder) {
-        return Future.succeededFuture(
-                toExchangeCall(request, response.getStatusCode(), response.getBody(), responseTypeReference,
-                        bidderDebugBuilder));
+    private <T, R> Future<ExchangeCall<T, R>> processResponse(
+            HttpClientResponse response, TypeReference<R> responseTypeReference, T request,
+            BidderDebug.BidderDebugBuilder bidderDebugBuilder) {
+
+        return Future.succeededFuture(toExchangeCall(
+                request, response.getStatusCode(), response.getBody(), responseTypeReference, bidderDebugBuilder));
     }
 
     /**
      * Transforms HTTP call results into {@link ExchangeCall} filled with debug information,
      * {@link BidResponse} and errors happened along the way.
      */
-    private static <T, R> ExchangeCall toExchangeCall(T request, int statusCode, String body,
-                                                      TypeReference<R> responseTypeReference,
-                                                      BidderDebug.BidderDebugBuilder bidderDebugBuilder) {
+    private <T, R> ExchangeCall<T, R> toExchangeCall(T request, int statusCode, String body,
+                                                     TypeReference<R> responseTypeReference,
+                                                     BidderDebug.BidderDebugBuilder bidderDebugBuilder) {
         final BidderDebug bidderDebug = completeBidderDebug(bidderDebugBuilder, statusCode, body);
 
         if (statusCode == HttpResponseStatus.NO_CONTENT.code()) {
@@ -172,7 +182,7 @@ public class HttpAdapterConnector {
 
         final R bidResponse;
         try {
-            bidResponse = Json.decodeValue(body, responseTypeReference);
+            bidResponse = mapper.decodeValue(body, responseTypeReference);
         } catch (DecodeException e) {
             return ExchangeCall.error(bidderDebug, BidderError.badServerResponse(e.getMessage()));
         }
@@ -201,14 +211,12 @@ public class HttpAdapterConnector {
 
         final PreBidRequest preBidRequest = preBidRequestContext.getPreBidRequest();
         if (preBidRequest.getApp() == null
-                && preBidRequestContext.getUidsCookie().uidFrom(usersyncer.cookieFamilyName()) == null) {
+                && preBidRequestContext.getUidsCookie().uidFrom(usersyncer.getCookieFamilyName()) == null) {
 
-            final String gdpr = GdprUtils.gdprFrom(preBidRequest.getRegs());
-            final String gdprConsent = GdprUtils.gdprConsentFrom(preBidRequest.getUser());
-
+            final Privacy privacy = privacyExtractor.validPrivacyFrom(preBidRequest.getRegs(), preBidRequest.getUser());
             bidderStatusBuilder
                     .noCookie(true)
-                    .usersync(usersyncer.usersyncInfo().withGdpr(gdpr, gdprConsent));
+                    .usersync(UsersyncInfo.from(usersyncer).withPrivacy(privacy).assemble());
         }
 
         final List<Result<List<Bid>>> bidsWithErrors = exchangeCalls.stream()

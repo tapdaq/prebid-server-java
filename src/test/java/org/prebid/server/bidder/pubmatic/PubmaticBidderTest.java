@@ -9,11 +9,9 @@ import com.iab.openrtb.request.BidRequest;
 import com.iab.openrtb.request.Imp;
 import com.iab.openrtb.request.Publisher;
 import com.iab.openrtb.request.Site;
-import com.iab.openrtb.request.Video;
 import com.iab.openrtb.response.Bid;
 import com.iab.openrtb.response.BidResponse;
 import com.iab.openrtb.response.SeatBid;
-import io.vertx.core.http.HttpHeaders;
 import io.vertx.core.http.HttpMethod;
 import org.junit.Before;
 import org.junit.Test;
@@ -28,6 +26,7 @@ import org.prebid.server.bidder.pubmatic.proto.PubmaticRequestExt;
 import org.prebid.server.proto.openrtb.ext.ExtPrebid;
 import org.prebid.server.proto.openrtb.ext.request.pubmatic.ExtImpPubmatic;
 import org.prebid.server.proto.openrtb.ext.request.pubmatic.ExtImpPubmaticKeyVal;
+import org.prebid.server.util.HttpUtil;
 
 import java.io.IOException;
 import java.util.List;
@@ -45,6 +44,7 @@ import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException
 import static org.assertj.core.api.Assertions.tuple;
 import static org.prebid.server.proto.openrtb.ext.response.BidType.banner;
 import static org.prebid.server.proto.openrtb.ext.response.BidType.video;
+import static org.prebid.server.proto.openrtb.ext.response.BidType.xNative;
 
 public class PubmaticBidderTest extends VertxTest {
 
@@ -54,12 +54,12 @@ public class PubmaticBidderTest extends VertxTest {
 
     @Before
     public void setUp() {
-        pubmaticBidder = new PubmaticBidder(ENDPOINT_URL);
+        pubmaticBidder = new PubmaticBidder(ENDPOINT_URL, jacksonMapper);
     }
 
     @Test
     public void creationShouldFailOnInvalidEndpointUrl() {
-        assertThatIllegalArgumentException().isThrownBy(() -> new PubmaticBidder("invalid_url"));
+        assertThatIllegalArgumentException().isThrownBy(() -> new PubmaticBidder("invalid_url", jacksonMapper));
     }
 
     @Test
@@ -88,7 +88,8 @@ public class PubmaticBidderTest extends VertxTest {
 
         // then
         assertThat(result.getErrors()).hasSize(1)
-                .containsOnly(BidderError.badInput("Invalid MediaType. PubMatic only supports Banner and Video. Ignoring ImpID=123"));
+                .containsOnly(BidderError.badInput(
+                        "Invalid MediaType. PubMatic only supports Banner and Video. Ignoring ImpID=123"));
         assertThat(result.getValue()).isEmpty();
     }
 
@@ -97,7 +98,7 @@ public class PubmaticBidderTest extends VertxTest {
         // given
         final BidRequest bidRequest = givenBidRequest(
                 identity(),
-                extImpPubmaticBuilder -> extImpPubmaticBuilder.adSlot("invalid ad slot"));
+                extImpPubmaticBuilder -> extImpPubmaticBuilder.adSlot("invalid ad slot@"));
 
         // when
         final Result<List<HttpRequest<BidRequest>>> result = pubmaticBidder.makeHttpRequests(bidRequest);
@@ -136,7 +137,7 @@ public class PubmaticBidderTest extends VertxTest {
 
         // then
         assertThat(result.getErrors()).hasSize(1)
-                .containsOnly(BidderError.badInput("Invalid width or height provided in adSlot"));
+                .containsOnly(BidderError.badInput("Invalid size provided in adSlot"));
         assertThat(result.getValue()).isEmpty();
     }
 
@@ -152,7 +153,7 @@ public class PubmaticBidderTest extends VertxTest {
 
         // then
         assertThat(result.getErrors()).hasSize(1)
-                .containsOnly(BidderError.badInput("Invalid width or height provided in adSlot"));
+                .containsOnly(BidderError.badInput("Invalid size provided in adSlot"));
         assertThat(result.getValue()).isEmpty();
     }
 
@@ -169,7 +170,8 @@ public class PubmaticBidderTest extends VertxTest {
 
         // then
         assertThat(result.getErrors()).hasSize(1);
-        assertThat(result.getErrors().get(0).getMessage()).startsWith("Failed to create keywords with error: Unexpected character");
+        assertThat(result.getErrors().get(0).getMessage())
+                .startsWith("Failed to create keywords with error: Unexpected character");
         assertThat(result.getValue()).isEmpty();
     }
 
@@ -307,7 +309,7 @@ public class PubmaticBidderTest extends VertxTest {
     }
 
     @Test
-    public void makeHttpRequestsShouldSetRequestExtFromWrapExt() throws IOException {
+    public void makeHttpRequestsShouldSetRequestExtFromWrapExt() {
         // given
         final BidRequest bidRequest = givenBidRequest(
                 identity(),
@@ -425,8 +427,8 @@ public class PubmaticBidderTest extends VertxTest {
         assertThat(result.getValue().get(0).getHeaders()).isNotNull()
                 .extracting(Map.Entry::getKey, Map.Entry::getValue)
                 .containsOnly(
-                        tuple(HttpHeaders.CONTENT_TYPE.toString(), "application/json;charset=utf-8"),
-                        tuple(HttpHeaders.ACCEPT.toString(), "application/json"));
+                        tuple(HttpUtil.CONTENT_TYPE_HEADER.toString(), "application/json;charset=utf-8"),
+                        tuple(HttpUtil.ACCEPT_HEADER.toString(), "application/json"));
     }
 
     @Test
@@ -475,11 +477,8 @@ public class PubmaticBidderTest extends VertxTest {
     @Test
     public void makeBidsShouldReturnBannerBid() throws JsonProcessingException {
         // given
-        final HttpCall<BidRequest> httpCall = givenHttpCall(
-                givenBidRequest(impBuilder -> impBuilder.id("123")
-                        .banner(Banner.builder().build())),
-                mapper.writeValueAsString(
-                        givenBidResponse(bidBuilder -> bidBuilder.impid("123"))));
+        final HttpCall<BidRequest> httpCall = givenHttpCall(null,
+                mapper.writeValueAsString(givenBidResponse(bidBuilder -> bidBuilder.impid("123"))));
 
         // when
         final Result<List<BidderBid>> result = pubmaticBidder.makeBids(httpCall, null);
@@ -491,14 +490,12 @@ public class PubmaticBidderTest extends VertxTest {
     }
 
     @Test
-    public void makeBidsShouldReturnVideoBidIfRequestImpHasVideo() throws JsonProcessingException {
+    public void makeBidsShouldReturnVideoBidIfExtBidContainsBidTypeOne() throws JsonProcessingException {
         // given
-        final HttpCall<BidRequest> httpCall = givenHttpCall(
-                givenBidRequest(builder -> builder.id("123")
-                        .video(Video.builder().build())
-                        .banner(Banner.builder().build())),
+        final ObjectNode bidType = mapper.createObjectNode().put("BidType", 1);
+        final HttpCall<BidRequest> httpCall = givenHttpCall(null,
                 mapper.writeValueAsString(
-                        givenBidResponse(bidBuilder -> bidBuilder.impid("123"))));
+                        givenBidResponse(bidBuilder -> bidBuilder.impid("123").ext(bidType))));
 
         // when
         final Result<List<BidderBid>> result = pubmaticBidder.makeBids(httpCall, null);
@@ -506,7 +503,41 @@ public class PubmaticBidderTest extends VertxTest {
         // then
         assertThat(result.getErrors()).isEmpty();
         assertThat(result.getValue())
-                .containsOnly(BidderBid.of(Bid.builder().impid("123").build(), video, "USD"));
+                .containsOnly(BidderBid.of(Bid.builder().impid("123").ext(bidType).build(), video, "USD"));
+    }
+
+    @Test
+    public void makeBidsShouldReturnXNativeBidIfExtBidContainsBidTypeTwo() throws JsonProcessingException {
+        // given
+        final ObjectNode bidType = mapper.createObjectNode().put("BidType", 2);
+        final HttpCall<BidRequest> httpCall = givenHttpCall(null,
+                mapper.writeValueAsString(
+                        givenBidResponse(bidBuilder -> bidBuilder.impid("123").ext(bidType))));
+
+        // when
+        final Result<List<BidderBid>> result = pubmaticBidder.makeBids(httpCall, null);
+
+        // then
+        assertThat(result.getErrors()).isEmpty();
+        assertThat(result.getValue())
+                .containsOnly(BidderBid.of(Bid.builder().impid("123").ext(bidType).build(), xNative, "USD"));
+    }
+
+    @Test
+    public void makeBidsShouldReturnBannerBidIfExtBidContainsIllegalBidType() throws JsonProcessingException {
+        // given
+        final ObjectNode bidType = mapper.createObjectNode().put("BidType", 100);
+        final HttpCall<BidRequest> httpCall = givenHttpCall(null,
+                mapper.writeValueAsString(
+                        givenBidResponse(bidBuilder -> bidBuilder.impid("123").ext(bidType))));
+
+        // when
+        final Result<List<BidderBid>> result = pubmaticBidder.makeBids(httpCall, null);
+
+        // then
+        assertThat(result.getErrors()).isEmpty();
+        assertThat(result.getValue())
+                .containsOnly(BidderBid.of(Bid.builder().impid("123").ext(bidType).build(), banner, "USD"));
     }
 
     @Test
@@ -514,9 +545,11 @@ public class PubmaticBidderTest extends VertxTest {
         assertThat(pubmaticBidder.extractTargeting(mapper.createObjectNode())).isEqualTo(emptyMap());
     }
 
-    private static BidRequest givenBidRequest(Function<BidRequest.BidRequestBuilder, BidRequest.BidRequestBuilder> bidRequestCustomizer,
-                                              Function<Imp.ImpBuilder, Imp.ImpBuilder> impCustomizer,
-                                              Function<ExtImpPubmatic.ExtImpPubmaticBuilder, ExtImpPubmatic.ExtImpPubmaticBuilder> extCustomizer) {
+    private static BidRequest givenBidRequest(
+            Function<BidRequest.BidRequestBuilder, BidRequest.BidRequestBuilder> bidRequestCustomizer,
+            Function<Imp.ImpBuilder, Imp.ImpBuilder> impCustomizer,
+            Function<ExtImpPubmatic.ExtImpPubmaticBuilder, ExtImpPubmatic.ExtImpPubmaticBuilder> extCustomizer) {
+
         return bidRequestCustomizer.apply(BidRequest.builder()
                 .imp(singletonList(givenImp(impCustomizer, extCustomizer))))
                 .build();
@@ -526,13 +559,17 @@ public class PubmaticBidderTest extends VertxTest {
         return givenBidRequest(identity(), impCustomizer, identity());
     }
 
-    private static BidRequest givenBidRequest(Function<Imp.ImpBuilder, Imp.ImpBuilder> impCustomizer,
-                                              Function<ExtImpPubmatic.ExtImpPubmaticBuilder, ExtImpPubmatic.ExtImpPubmaticBuilder> extCustomizer) {
+    private static BidRequest givenBidRequest(
+            Function<Imp.ImpBuilder, Imp.ImpBuilder> impCustomizer,
+            Function<ExtImpPubmatic.ExtImpPubmaticBuilder, ExtImpPubmatic.ExtImpPubmaticBuilder> extCustomizer) {
+
         return givenBidRequest(identity(), impCustomizer, extCustomizer);
     }
 
     private static Imp givenImp(Function<Imp.ImpBuilder, Imp.ImpBuilder> impCustomizer,
-                                Function<ExtImpPubmatic.ExtImpPubmaticBuilder, ExtImpPubmatic.ExtImpPubmaticBuilder> extCustomizer) {
+                                Function<ExtImpPubmatic.ExtImpPubmaticBuilder,
+                                        ExtImpPubmatic.ExtImpPubmaticBuilder> extCustomizer) {
+
         return impCustomizer.apply(Imp.builder()
                 .id("123")
                 .banner(Banner.builder().build())

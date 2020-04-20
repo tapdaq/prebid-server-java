@@ -1,19 +1,18 @@
 package org.prebid.server.spring.config.bidder;
 
-import org.prebid.server.bidder.Adapter;
-import org.prebid.server.bidder.Bidder;
+import lombok.AllArgsConstructor;
+import lombok.Data;
+import lombok.EqualsAndHashCode;
+import lombok.NoArgsConstructor;
 import org.prebid.server.bidder.BidderDeps;
-import org.prebid.server.bidder.BidderRequester;
-import org.prebid.server.bidder.HttpAdapterConnector;
-import org.prebid.server.bidder.HttpBidderRequester;
-import org.prebid.server.bidder.MetaInfo;
-import org.prebid.server.bidder.Usersyncer;
 import org.prebid.server.bidder.brightroll.BrightrollBidder;
-import org.prebid.server.bidder.brightroll.BrightrollMetaInfo;
-import org.prebid.server.bidder.brightroll.BrightrollUsersyncer;
+import org.prebid.server.bidder.brightroll.model.PublisherOverride;
+import org.prebid.server.json.JacksonMapper;
 import org.prebid.server.spring.config.bidder.model.BidderConfigurationProperties;
+import org.prebid.server.spring.config.bidder.util.BidderDepsAssembler;
+import org.prebid.server.spring.config.bidder.util.BidderInfoCreator;
+import org.prebid.server.spring.config.bidder.util.UsersyncerCreator;
 import org.prebid.server.spring.env.YamlPropertySourceFactory;
-import org.prebid.server.vertx.http.HttpClient;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
@@ -21,71 +20,86 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.PropertySource;
+import org.springframework.validation.annotation.Validated;
 
+import javax.validation.constraints.NotBlank;
+import java.util.Collections;
 import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
 
 @Configuration
 @PropertySource(value = "classpath:/bidder-config/brightroll.yaml", factory = YamlPropertySourceFactory.class)
-public class BrightrollConfiguration extends BidderConfiguration {
+public class BrightrollConfiguration {
 
     private static final String BIDDER_NAME = "brightroll";
 
+    @Value("${external-url}")
+    @NotBlank
+    private String externalUrl;
+
+    @Autowired
+    private JacksonMapper mapper;
+
     @Autowired
     @Qualifier("brightrollConfigurationProperties")
-    private BidderConfigurationProperties configProperties;
-
-    @Value("${external-url}")
-    private String externalUrl;
+    private BrightrollConfigurationProperties configProperties;
 
     @Bean("brightrollConfigurationProperties")
     @ConfigurationProperties("adapters.brightroll")
-    BidderConfigurationProperties configurationProperties() {
-        return new BidderConfigurationProperties();
+    BrightrollConfigurationProperties configurationProperties() {
+        return new BrightrollConfigurationProperties();
     }
 
     @Bean
-    BidderDeps brightrollBidderDeps(HttpClient httpClient, HttpAdapterConnector httpAdapterConnector) {
-        return bidderDeps(httpClient, httpAdapterConnector);
+    BidderDeps brightrollBidderDeps() {
+        final Map<String, PublisherOverride> publisherIdToOverride = configProperties.getAccounts() == null
+                ? Collections.emptyMap()
+                : configProperties.getAccounts().stream()
+                        .collect(Collectors.toMap(BidderAccount::getId, this::toPublisherOverride));
+        return BidderDepsAssembler.forBidder(BIDDER_NAME)
+                .withConfig(configProperties)
+                .bidderInfo(BidderInfoCreator.create(configProperties))
+                .usersyncerCreator(UsersyncerCreator.create(configProperties.getUsersync(), externalUrl))
+                .bidderCreator(() -> new BrightrollBidder(configProperties.getEndpoint(), mapper,
+                        publisherIdToOverride))
+                .assemble();
     }
 
-    @Override
-    protected String bidderName() {
-        return BIDDER_NAME;
+    private PublisherOverride toPublisherOverride(BidderAccount bidderAccount) {
+        return PublisherOverride.of(bidderAccount.getBadv(), bidderAccount.getBcat(), bidderAccount.getImpBattr());
     }
 
-    @Override
-    protected List<String> deprecatedNames() {
-        return configProperties.getDeprecatedNames();
+    @Validated
+    @Data
+    @EqualsAndHashCode(callSuper = true)
+    @NoArgsConstructor
+    @AllArgsConstructor
+    public static class BrightrollConfigurationProperties extends BidderConfigurationProperties {
+
+        private List<BidderAccount> accounts;
     }
 
-    @Override
-    protected List<String> aliases() {
-        return configProperties.getAliases();
-    }
+    @Data
+    @NoArgsConstructor
+    @AllArgsConstructor
+    public static class BidderAccount {
 
-    @Override
-    protected MetaInfo createMetaInfo() {
-        return new BrightrollMetaInfo(configProperties.getEnabled(), configProperties.getPbsEnforcesGdpr());
-    }
+        private String id;
 
-    @Override
-    protected Usersyncer createUsersyncer() {
-        return new BrightrollUsersyncer(configProperties.getUsersyncUrl(), externalUrl);
-    }
+        /**
+         * Blocked advertisers.
+         */
+        private List<String> badv;
 
-    @Override
-    protected Bidder<?> createBidder(MetaInfo metaInfo) {
-        return new BrightrollBidder(configProperties.getEndpoint());
-    }
+        /**
+         * Blocked advertisers.
+         */
+        private List<String> bcat;
 
-    @Override
-    protected Adapter<?, ?> createAdapter(Usersyncer usersyncer) {
-        return null;
-    }
-
-    @Override
-    protected BidderRequester createBidderRequester(HttpClient httpClient, Bidder<?> bidder, Adapter<?, ?> adapter,
-                                                    Usersyncer usersyncer, HttpAdapterConnector httpAdapterConnector) {
-        return new HttpBidderRequester<>(bidder, httpClient);
+        /**
+         * Blocked IAB categories.
+         */
+        private List<Integer> impBattr;
     }
 }

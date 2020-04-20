@@ -31,7 +31,6 @@ import java.util.Set;
 import static java.util.Arrays.asList;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
-import static org.assertj.core.api.Assertions.assertThatNullPointerException;
 import static org.mockito.BDDMockito.given;
 
 public class BidderParamValidatorTest extends VertxTest {
@@ -62,31 +61,27 @@ public class BidderParamValidatorTest extends VertxTest {
                 asList(RUBICON, APPNEXUS, ADFORM, BRIGHTROLL, SOVRN, ADTELLIGENT, FACEBOOK, OPENX, EPLANNING,
                         SOMOAUDIENCE, BEACHFRONT)));
 
-        bidderParamValidator = BidderParamValidator.create(bidderCatalog, "static/bidder-params");
-    }
-
-    @Test
-    public void createShouldFailOnNullArguments() {
-        assertThatNullPointerException().isThrownBy(() -> BidderParamValidator.create(null, null));
-        assertThatNullPointerException().isThrownBy(() -> BidderParamValidator.create(bidderCatalog, null));
+        bidderParamValidator = BidderParamValidator.create(bidderCatalog, "static/bidder-params", jacksonMapper);
     }
 
     @Test
     public void createShouldFailOnInvalidSchemaPath() {
         assertThatIllegalArgumentException().isThrownBy(
-                () -> BidderParamValidator.create(bidderCatalog, "noschema"));
+                () -> BidderParamValidator.create(bidderCatalog, "noschema", jacksonMapper));
     }
 
     @Test
     public void createShouldFailOnEmptySchemaFile() {
         assertThatIllegalArgumentException().isThrownBy(
-                () -> BidderParamValidator.create(bidderCatalog, "org/prebid/server/validation/schema/empty"));
+                () -> BidderParamValidator.create(
+                        bidderCatalog, "org/prebid/server/validation/schema/empty", jacksonMapper));
     }
 
     @Test
     public void createShouldFailOnInvalidSchemaFile() {
         assertThatIllegalArgumentException().isThrownBy(
-                () -> BidderParamValidator.create(bidderCatalog, "org/prebid/server/validation/schema/invalid"));
+                () -> BidderParamValidator.create(
+                        bidderCatalog, "org/prebid/server/validation/schema/invalid", jacksonMapper));
     }
 
     @Test
@@ -146,7 +141,7 @@ public class BidderParamValidatorTest extends VertxTest {
     @Test
     public void validateShouldNotReturnValidationMessagesWhenAdformImpExtIsOk() {
         // given
-        final ExtImpAdform ext = ExtImpAdform.of(15L, "gross");
+        final ExtImpAdform ext = ExtImpAdform.of(15L, "gross", null, null);
 
         final JsonNode node = mapper.convertValue(ext, JsonNode.class);
 
@@ -250,7 +245,7 @@ public class BidderParamValidatorTest extends VertxTest {
     @Test
     public void validateShouldNotReturnValidationMessagesWhenFacebookImpExtIsOk() {
         // given
-        final ExtImpFacebook ext = ExtImpFacebook.of("placementId");
+        final ExtImpFacebook ext = ExtImpFacebook.of("placementId", "publisherId");
 
         final JsonNode node = mapper.convertValue(ext, JsonNode.class);
 
@@ -277,7 +272,7 @@ public class BidderParamValidatorTest extends VertxTest {
     public void validateShouldNotReturnValidationMessagesWhenOpenxImpExtIsOk() {
         // given
         final ExtImpOpenx ext = ExtImpOpenx.builder()
-                .customParams(Collections.singletonMap("foo", "bar"))
+                .customParams(Collections.singletonMap("foo", mapper.convertValue("bar", JsonNode.class)))
                 .customFloor(BigDecimal.valueOf(0.2))
                 .delDomain("se-demo-d.openx.net")
                 .unit("2222")
@@ -295,7 +290,7 @@ public class BidderParamValidatorTest extends VertxTest {
     public void validateShouldReturnValidationMessagesWhenOpenxExtNotValid() {
         // given
         final ExtImpOpenx ext = ExtImpOpenx.builder()
-                .customParams(Collections.singletonMap("foo", "bar"))
+                .customParams(Collections.singletonMap("foo", mapper.convertValue("bar", JsonNode.class)))
                 .customFloor(BigDecimal.valueOf(0.2))
                 .delDomain("se-demo-d.openx.net")
                 .unit("not-numeric")
@@ -309,11 +304,10 @@ public class BidderParamValidatorTest extends VertxTest {
         assertThat(messages.size()).isEqualTo(1);
     }
 
-
     @Test
     public void validateShouldNotReturnValidationMessagesWhenEplanningImpExtIsOk() {
         // given
-        final ExtImpEplanning ext = ExtImpEplanning.of("exchangeId");
+        final ExtImpEplanning ext = ExtImpEplanning.of("clientId", "");
         final JsonNode node = mapper.convertValue(ext, JsonNode.class);
 
         // when
@@ -363,7 +357,7 @@ public class BidderParamValidatorTest extends VertxTest {
     @Test
     public void validateShouldNotReturnValidationMessagesWhenBeachfrontImpExtIsOk() {
         // given
-        final ExtImpBeachfront ext = ExtImpBeachfront.of("appId", 1f);
+        final ExtImpBeachfront ext = ExtImpBeachfront.of("appId", null, BigDecimal.ONE, "adm");
         final JsonNode node = mapper.convertValue(ext, JsonNode.class);
 
         // when
@@ -382,7 +376,7 @@ public class BidderParamValidatorTest extends VertxTest {
         final Set<String> messages = bidderParamValidator.validate(BEACHFRONT, node);
 
         // then
-        assertThat(messages.size()).isEqualTo(2);
+        assertThat(messages.size()).isEqualTo(3);
     }
 
     @Test
@@ -390,7 +384,8 @@ public class BidderParamValidatorTest extends VertxTest {
         // given
         given(bidderCatalog.names()).willReturn(new HashSet<>(asList("test-rubicon", "test-appnexus")));
 
-        bidderParamValidator = BidderParamValidator.create(bidderCatalog, "org/prebid/server/validation/schema/valid");
+        bidderParamValidator = BidderParamValidator.create(
+                bidderCatalog, "org/prebid/server/validation/schema/valid", jacksonMapper);
 
         // when
         final String result = bidderParamValidator.schemas();

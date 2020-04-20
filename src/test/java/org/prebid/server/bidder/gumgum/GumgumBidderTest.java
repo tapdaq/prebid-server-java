@@ -44,12 +44,12 @@ public class GumgumBidderTest extends VertxTest {
 
     @Before
     public void setUp() {
-        gumgumBidder = new GumgumBidder(ENDPOINT_URL);
+        gumgumBidder = new GumgumBidder(ENDPOINT_URL, jacksonMapper);
     }
 
     @Test
     public void creationShouldFailOnInvalidEndpointUrl() {
-        assertThatIllegalArgumentException().isThrownBy(() -> new GumgumBidder("invalid_url"));
+        assertThatIllegalArgumentException().isThrownBy(() -> new GumgumBidder("invalid_url", jacksonMapper));
     }
 
     @Test
@@ -265,8 +265,10 @@ public class GumgumBidderTest extends VertxTest {
         assertThat(gumgumBidder.extractTargeting(mapper.createObjectNode())).isEqualTo(emptyMap());
     }
 
-    private static BidRequest givenBidRequest(Function<BidRequest.BidRequestBuilder, BidRequest.BidRequestBuilder> bidRequestCustomizer,
-                                              Function<Imp.ImpBuilder, Imp.ImpBuilder> impCustomizer) {
+    private static BidRequest givenBidRequest(
+            Function<BidRequest.BidRequestBuilder, BidRequest.BidRequestBuilder> bidRequestCustomizer,
+            Function<Imp.ImpBuilder, Imp.ImpBuilder> impCustomizer) {
+
         return bidRequestCustomizer.apply(BidRequest.builder()
                 .imp(singletonList(givenImp(impCustomizer))))
                 .build();

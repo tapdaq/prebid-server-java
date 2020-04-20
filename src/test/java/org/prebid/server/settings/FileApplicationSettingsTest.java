@@ -10,8 +10,15 @@ import org.mockito.junit.MockitoJUnit;
 import org.mockito.junit.MockitoRule;
 import org.prebid.server.settings.model.Account;
 import org.prebid.server.settings.model.StoredDataResult;
+import org.prebid.server.settings.model.StoredResponseDataResult;
 
-import static java.util.Collections.*;
+import java.util.HashSet;
+
+import static java.util.Arrays.asList;
+import static java.util.Collections.emptySet;
+import static java.util.Collections.singleton;
+import static java.util.Collections.singletonList;
+import static java.util.Collections.singletonMap;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -35,7 +42,7 @@ public class FileApplicationSettingsTest {
 
         // when and then
         assertThatIllegalArgumentException()
-                .isThrownBy(() -> FileApplicationSettings.create(fileSystem, "ignore", "ignore", "ignore"));
+                .isThrownBy(() -> new FileApplicationSettings(fileSystem, "ignore", "ignore", "ignore", "ignore"));
     }
 
     @Test
@@ -44,7 +51,7 @@ public class FileApplicationSettingsTest {
         given(fileSystem.readFileBlocking(anyString())).willReturn(Buffer.buffer("configs:"));
 
         final FileApplicationSettings applicationSettings =
-                FileApplicationSettings.create(fileSystem, "ignore", "ignore", "ignore");
+                new FileApplicationSettings(fileSystem, "ignore", "ignore", "ignore", "ignore");
 
         // when
         final Future<Account> account = applicationSettings.getAccountById("123", null);
@@ -56,26 +63,38 @@ public class FileApplicationSettingsTest {
     @Test
     public void getAccountByIdShouldReturnPresentAccount() {
         // given
-        given(fileSystem.readFileBlocking(anyString())).willReturn(Buffer.buffer("accounts: [ '123', '456' ]"));
+        given(fileSystem.readFileBlocking(anyString()))
+                .willReturn(Buffer.buffer("accounts: [ { id: '123', priceGranularity: 'low', bannerCacheTtl: '100',"
+                        + " videoCacheTtl : '100', eventsEnabled: 'true', enforceGdpr: 'true',"
+                        + " analyticsSamplingFactor : '1'} ]"));
 
         final FileApplicationSettings applicationSettings =
-                FileApplicationSettings.create(fileSystem, "ignore", "ignore", "ignore");
+                new FileApplicationSettings(fileSystem, "ignore", "ignore", "ignore", "ignore");
 
         // when
         final Future<Account> account = applicationSettings.getAccountById("123", null);
 
         // then
         assertThat(account.succeeded()).isTrue();
-        assertThat(account.result()).isEqualTo(Account.of("123", null));
+        assertThat(account.result()).isEqualTo(Account.builder()
+                .id("123")
+                .priceGranularity("low")
+                .bannerCacheTtl(100)
+                .videoCacheTtl(100)
+                .eventsEnabled(true)
+                .enforceGdpr(true)
+                .analyticsSamplingFactor(1)
+                .build());
     }
 
     @Test
     public void getAccountByIdShouldReturnEmptyForUnknownAccount() {
         // given
-        given(fileSystem.readFileBlocking(anyString())).willReturn(Buffer.buffer("accounts: [ '123', '456' ]"));
+        given(fileSystem.readFileBlocking(anyString()))
+                .willReturn(Buffer.buffer("accounts: [ {id: '123'}, {id: '456'} ]"));
 
         final FileApplicationSettings applicationSettings =
-                FileApplicationSettings.create(fileSystem, "ignore", "ignore", "ignore");
+                new FileApplicationSettings(fileSystem, "ignore", "ignore", "ignore", "ignore");
 
         // when
         final Future<Account> account = applicationSettings.getAccountById("789", null);
@@ -90,7 +109,7 @@ public class FileApplicationSettingsTest {
         given(fileSystem.readFileBlocking(anyString())).willReturn(Buffer.buffer("accounts:"));
 
         final FileApplicationSettings applicationSettings =
-                FileApplicationSettings.create(fileSystem, "ignore", "ignore", "ignore");
+                new FileApplicationSettings(fileSystem, "ignore", "ignore", "ignore", "ignore");
 
         // when
         final Future<String> config = applicationSettings.getAdUnitConfigById("123", null);
@@ -106,7 +125,7 @@ public class FileApplicationSettingsTest {
                 "configs: [ {id: '123', config: '{\"bidder\": \"rubicon\"}'}, {id: '456'} ]"));
 
         final FileApplicationSettings applicationSettings =
-                FileApplicationSettings.create(fileSystem, "ignore", "ignore", "ignore");
+                new FileApplicationSettings(fileSystem, "ignore", "ignore", "ignore", "ignore");
 
         // when
         final Future<String> adUnitConfigById1 = applicationSettings.getAdUnitConfigById("123", null);
@@ -125,7 +144,7 @@ public class FileApplicationSettingsTest {
         given(fileSystem.readFileBlocking(anyString())).willReturn(Buffer.buffer("configs: [ id: '123', id: '456' ]"));
 
         final FileApplicationSettings applicationSettings =
-                FileApplicationSettings.create(fileSystem, "ignore", "ignore", "ignore");
+                new FileApplicationSettings(fileSystem, "ignore", "ignore", "ignore", "ignore");
 
         // when
         final Future<String> config = applicationSettings.getAdUnitConfigById("789", null);
@@ -145,7 +164,7 @@ public class FileApplicationSettingsTest {
                 .willReturn(Buffer.buffer("value1")) // stored request
                 .willReturn(Buffer.buffer("value2")); // stored imp
         final FileApplicationSettings applicationSettings =
-                FileApplicationSettings.create(fileSystem, "ignore", "ignore", "ignore");
+                new FileApplicationSettings(fileSystem, "ignore", "ignore", "ignore", "ignore");
 
         // when
         final Future<StoredDataResult> storedRequestResult =
@@ -156,8 +175,6 @@ public class FileApplicationSettingsTest {
         assertThat(storedRequestResult.succeeded()).isTrue();
         assertThat(storedRequestResult.result().getErrors()).isNotNull().hasSize(1)
                 .isEqualTo(singletonList("No stored request found for id: 2"));
-        assertThat(storedRequestResult.result().getStoredIdToRequest()).isNotNull().hasSize(1)
-                .isEqualTo(singletonMap("1", "value1"));
     }
 
     @Test
@@ -165,13 +182,17 @@ public class FileApplicationSettingsTest {
         // given
         given(fileSystem.readDirBlocking(anyString()))
                 .willReturn(singletonList("/home/user/requests/1.json"))
-                .willReturn(singletonList("/home/user/imps/1.json"));
+                .willReturn(singletonList("/home/user/imps/1.json"))
+                .willReturn(singletonList("/home/user/responses/3.json"));
+
         given(fileSystem.readFileBlocking(anyString()))
                 .willReturn(Buffer.buffer("accounts:")) // settings file
                 .willReturn(Buffer.buffer("value1")) // stored request
-                .willReturn(Buffer.buffer("value2")); // stored imp
+                .willReturn(Buffer.buffer("value2")) // stored imp
+                .willReturn(Buffer.buffer("value3")); // stored response
+
         final FileApplicationSettings applicationSettings =
-                FileApplicationSettings.create(fileSystem, "ignore", "ignore", "ignore");
+                new FileApplicationSettings(fileSystem, "ignore", "ignore", "ignore", "ignore");
 
         // when
         final Future<StoredDataResult> storedRequestResult =
@@ -182,8 +203,6 @@ public class FileApplicationSettingsTest {
         assertThat(storedRequestResult.succeeded()).isTrue();
         assertThat(storedRequestResult.result().getErrors()).isNotNull().hasSize(1)
                 .isEqualTo(singletonList("No stored imp found for id: 2"));
-        assertThat(storedRequestResult.result().getStoredIdToRequest()).isNotNull().hasSize(1)
-                .isEqualTo(singletonMap("1", "value1"));
     }
 
     @Test
@@ -191,13 +210,16 @@ public class FileApplicationSettingsTest {
         // given
         given(fileSystem.readDirBlocking(anyString()))
                 .willReturn(singletonList("/home/user/requests/1.json"))
-                .willReturn(singletonList("/home/user/imps/2.json"));
+                .willReturn(singletonList("/home/user/imps/2.json"))
+                .willReturn(singletonList("/home/user/responses/3.json"));
+
         given(fileSystem.readFileBlocking(anyString()))
                 .willReturn(Buffer.buffer("accounts:")) // settings file
                 .willReturn(Buffer.buffer("value1")) // stored request
-                .willReturn(Buffer.buffer("value2")); // stored imp
+                .willReturn(Buffer.buffer("value2")) // stored imp
+                .willReturn(Buffer.buffer("value3")); // stored response
         final FileApplicationSettings applicationSettings =
-                FileApplicationSettings.create(fileSystem, "ignore", "ignore", "ignore");
+                new FileApplicationSettings(fileSystem, "ignore", "ignore", "ignore", "ignore");
 
         // when
         final Future<StoredDataResult> storedRequestResult =
@@ -224,7 +246,7 @@ public class FileApplicationSettingsTest {
                 .willReturn(Buffer.buffer("value1")) // stored request
                 .willReturn(Buffer.buffer("value2")); // stored imp
         final FileApplicationSettings applicationSettings =
-                FileApplicationSettings.create(fileSystem, "ignore", "ignore", "ignore");
+                new FileApplicationSettings(fileSystem, "ignore", "ignore", "ignore", "ignore");
 
         // when
         final Future<StoredDataResult> storedRequestResult =
@@ -236,13 +258,100 @@ public class FileApplicationSettingsTest {
     }
 
     @Test
+    public void getStoredResponsesShouldReturnEmptyResultAndErrorsWhenResponseIdsAreEmpty() {
+        // given
+        given(fileSystem.readDirBlocking(anyString()))
+                .willReturn(singletonList("/home/user/requests/3.json"))
+                .willReturn(singletonList("/home/user/imps/2.json"))
+                .willReturn(singletonList("/home/user/responses/1.json"));
+
+        given(fileSystem.readFileBlocking(anyString()))
+                .willReturn(Buffer.buffer("accounts:")) // settings file
+                .willReturn(Buffer.buffer("value3")) // requests
+                .willReturn(Buffer.buffer("value2")) // imps
+                .willReturn(Buffer.buffer("value1")); // responses
+
+        final FileApplicationSettings applicationSettings =
+                new FileApplicationSettings(fileSystem, "ignore", "ignore", "ignore", "ignore");
+
+        // when
+        final Future<StoredResponseDataResult> storedResponsesResult =
+                applicationSettings.getStoredResponses(emptySet(), null);
+
+        // then
+        verify(fileSystem).readFileBlocking(eq("/home/user/responses/1.json"));
+        assertThat(storedResponsesResult.succeeded()).isTrue();
+        assertThat(storedResponsesResult.result().getErrors()).isNotNull().isEmpty();
+        assertThat(storedResponsesResult.result().getStoredSeatBid()).isNotNull().isEmpty();
+    }
+
+    @Test
+    public void getStoredResponsesShouldReturnResultWithMissingIdsIfNotAllIdsArePresent() {
+        // given
+        given(fileSystem.readDirBlocking(anyString()))
+                .willReturn(singletonList("/home/user/requests/3.json"))
+                .willReturn(singletonList("/home/user/imps/2.json"))
+                .willReturn(singletonList("/home/user/responses/1.json"));
+
+        given(fileSystem.readFileBlocking(anyString()))
+                .willReturn(Buffer.buffer("accounts:")) // settings file
+                .willReturn(Buffer.buffer("value3")) // requests
+                .willReturn(Buffer.buffer("value2")) // imps
+                .willReturn(Buffer.buffer("value1")); // responses
+
+        final FileApplicationSettings applicationSettings =
+                new FileApplicationSettings(fileSystem, "ignore", "ignore", "ignore", "ignore");
+
+        // when
+        final Future<StoredResponseDataResult> storedResponsesResult =
+                applicationSettings.getStoredResponses(new HashSet<>(asList("1", "2")), null);
+
+        // then
+        verify(fileSystem).readFileBlocking(eq("/home/user/responses/1.json"));
+        assertThat(storedResponsesResult.succeeded()).isTrue();
+        assertThat(storedResponsesResult.result().getErrors()).isNotNull().hasSize(1)
+                .isEqualTo(singletonList("No stored seatbid found for id: 2"));
+        assertThat(storedResponsesResult.result().getStoredSeatBid()).isNotNull().hasSize(1)
+                .isEqualTo(singletonMap("1", "value1"));
+    }
+
+    @Test
+    public void getStoredResponsesShouldReturnResultWithoutErrorsIfAllIdsArePresent() {
+        // given
+        given(fileSystem.readDirBlocking(anyString()))
+                .willReturn(singletonList("/home/user/requests/3.json"))
+                .willReturn(singletonList("/home/user/imps/2.json"))
+                .willReturn(singletonList("/home/user/responses/1.json"));
+
+        given(fileSystem.readFileBlocking(anyString()))
+                .willReturn(Buffer.buffer("accounts:")) // settings file
+                .willReturn(Buffer.buffer("value3")) // requests
+                .willReturn(Buffer.buffer("value2")) // imps
+                .willReturn(Buffer.buffer("value1")); // responses
+
+        final FileApplicationSettings applicationSettings =
+                new FileApplicationSettings(fileSystem, "ignore", "ignore", "ignore", "ignore");
+
+        // when
+        final Future<StoredResponseDataResult> storedResponsesResult =
+                applicationSettings.getStoredResponses(singleton("1"), null);
+
+        // then
+        verify(fileSystem).readFileBlocking(eq("/home/user/responses/1.json"));
+        assertThat(storedResponsesResult.succeeded()).isTrue();
+        assertThat(storedResponsesResult.result().getErrors()).isNotNull().isEmpty();
+        assertThat(storedResponsesResult.result().getStoredSeatBid()).isNotNull().hasSize(1)
+                .isEqualTo(singletonMap("1", "value1"));
+    }
+
+    @Test
     public void storedDataInitializationShouldNotReadFromNonJsonFiles() {
         // given
         given(fileSystem.readDirBlocking(anyString())).willReturn(singletonList("/home/user/requests/1.txt"));
         given(fileSystem.readFileBlocking(anyString())).willReturn(Buffer.buffer("accounts:")); // settings file
 
         // when
-        FileApplicationSettings.create(fileSystem, "ignore", "ignore", "ignore");
+        new FileApplicationSettings(fileSystem, "ignore", "ignore", "ignore", "ignore");
 
         // then
         verify(fileSystem, never()).readFileBlocking(eq("1.txt"));

@@ -3,7 +3,6 @@ package org.prebid.server.auction;
 import de.malkusch.whoisServerList.publicSuffixList.PublicSuffixList;
 import de.malkusch.whoisServerList.publicSuffixList.PublicSuffixListFactory;
 import io.vertx.core.http.CaseInsensitiveHeaders;
-import io.vertx.core.http.HttpHeaders;
 import io.vertx.core.http.HttpServerRequest;
 import io.vertx.core.net.impl.SocketAddressImpl;
 import org.junit.Before;
@@ -13,10 +12,10 @@ import org.mockito.Mock;
 import org.mockito.junit.MockitoJUnit;
 import org.mockito.junit.MockitoRule;
 import org.prebid.server.exception.PreBidException;
+import org.prebid.server.util.HttpUtil;
 
 import java.net.MalformedURLException;
 
-import static io.vertx.core.http.HttpHeaders.REFERER;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.mockito.BDDMockito.given;
@@ -29,7 +28,6 @@ public class ImplicitParametersExtractorTest {
     private final PublicSuffixList psl = new PublicSuffixListFactory().build();
 
     private ImplicitParametersExtractor extractor;
-
     @Mock
     private HttpServerRequest httpRequest;
 
@@ -44,7 +42,7 @@ public class ImplicitParametersExtractorTest {
     @Test
     public void refererFromShouldReturnRefererFromRefererHeader() {
         // given
-        httpRequest.headers().set(REFERER, "http://example.com");
+        httpRequest.headers().set(HttpUtil.REFERER_HEADER, "http://example.com");
 
         // when and then
         assertThat(extractor.refererFrom(httpRequest)).isEqualTo("http://example.com");
@@ -53,7 +51,7 @@ public class ImplicitParametersExtractorTest {
     @Test
     public void refererFromShouldReturnRefererFromRefererHeaderIfUrlOverrideParamBlank() {
         // given
-        httpRequest.headers().set(REFERER, "http://example.com");
+        httpRequest.headers().set(HttpUtil.REFERER_HEADER, "http://example.com");
         given(httpRequest.getParam("url_override")).willReturn("");
 
         // when and then
@@ -81,7 +79,7 @@ public class ImplicitParametersExtractorTest {
     @Test
     public void refererFromShouldReturnRefererWithHttpSchemeIfRefererHeaderDoesNotContainScheme() {
         // given
-        httpRequest.headers().set(REFERER, "example.com");
+        httpRequest.headers().set(HttpUtil.REFERER_HEADER, "example.com");
 
         // when and then
         assertThat(extractor.refererFrom(httpRequest)).isEqualTo("http://example.com");
@@ -117,28 +115,28 @@ public class ImplicitParametersExtractorTest {
     @Test
     public void ipFromShouldReturnSingleIpFromXForwardedFor() {
         // given
-        httpRequest.headers().set("X-Forwarded-For", " 192.168.144.1 ");
+        httpRequest.headers().set("X-Forwarded-For", " 193.168.144.1 ");
 
         // when and then
-        assertThat(extractor.ipFrom(httpRequest)).isEqualTo("192.168.144.1");
+        assertThat(extractor.ipFrom(httpRequest)).isEqualTo("193.168.144.1");
     }
 
     @Test
-    public void ipFromShouldReturnFirstIpFromXForwardedFor() {
+    public void ipFromShouldReturnFirstValidIpFromXForwardedFor() {
         // given
-        httpRequest.headers().set("X-Forwarded-For", " 192.168.44.1 , 192.168.144.1 , 192.168.244.1 ");
+        httpRequest.headers().set("X-Forwarded-For", "192.168.144.1 , 192.168.244.2 , 193.168.44.1 ");
 
         // when and then
-        assertThat(extractor.ipFrom(httpRequest)).isEqualTo("192.168.44.1");
+        assertThat(extractor.ipFrom(httpRequest)).isEqualTo("193.168.44.1");
     }
 
     @Test
     public void ipFromShouldReturnRemoteAddress() {
         // given
-        given(httpRequest.remoteAddress()).willReturn(new SocketAddressImpl(0, "192.168.244.1"));
+        given(httpRequest.remoteAddress()).willReturn(new SocketAddressImpl(0, "193.168.244.1"));
 
         // when and then
-        assertThat(extractor.ipFrom(httpRequest)).isEqualTo("192.168.244.1");
+        assertThat(extractor.ipFrom(httpRequest)).isEqualTo("193.168.244.1");
     }
 
     @Test
@@ -153,7 +151,7 @@ public class ImplicitParametersExtractorTest {
     @Test
     public void uaFromShouldReturnUaFromUserAgentHeader() {
         // given
-        httpRequest.headers().set(HttpHeaders.USER_AGENT, " user agent ");
+        httpRequest.headers().set(HttpUtil.USER_AGENT_HEADER, " user agent ");
 
         // when and then
         assertThat(extractor.uaFrom(httpRequest)).isEqualTo("user agent");
@@ -167,7 +165,6 @@ public class ImplicitParametersExtractorTest {
         // when and then
         assertThat(extractor.secureFrom(httpRequest)).isEqualTo(1);
     }
-
 
     @Test
     public void secureFromShouldReturnOneIfConnectedViaSSL() {

@@ -5,80 +5,65 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.iab.openrtb.request.App;
 import com.iab.openrtb.request.BidRequest;
-import com.iab.openrtb.request.Device;
-import com.iab.openrtb.request.Geo;
 import com.iab.openrtb.request.Imp;
-import com.iab.openrtb.request.Publisher;
-import com.iab.openrtb.request.Regs;
 import com.iab.openrtb.request.Site;
+import com.iab.openrtb.request.Source;
 import com.iab.openrtb.request.User;
 import com.iab.openrtb.response.Bid;
 import com.iab.openrtb.response.BidResponse;
 import com.iab.openrtb.response.SeatBid;
 import io.vertx.core.CompositeFuture;
 import io.vertx.core.Future;
-import io.vertx.core.json.Json;
 import io.vertx.ext.web.RoutingContext;
-import lombok.AllArgsConstructor;
-import lombok.Builder;
-import lombok.Value;
 import org.apache.commons.collections4.CollectionUtils;
-import org.apache.commons.collections4.ListUtils;
 import org.apache.commons.lang3.ObjectUtils;
 import org.apache.commons.lang3.StringUtils;
+import org.prebid.server.auction.model.AuctionContext;
+import org.prebid.server.auction.model.BidRequestCacheInfo;
 import org.prebid.server.auction.model.BidderRequest;
 import org.prebid.server.auction.model.BidderResponse;
+import org.prebid.server.auction.model.PrivacyEnforcementResult;
+import org.prebid.server.auction.model.StoredResponseResult;
+import org.prebid.server.bidder.Bidder;
 import org.prebid.server.bidder.BidderCatalog;
+import org.prebid.server.bidder.HttpBidderRequester;
+import org.prebid.server.bidder.Usersyncer;
 import org.prebid.server.bidder.model.BidderBid;
 import org.prebid.server.bidder.model.BidderError;
 import org.prebid.server.bidder.model.BidderSeatBid;
-import org.prebid.server.cache.CacheService;
-import org.prebid.server.cache.model.CacheContext;
-import org.prebid.server.cache.model.CacheIdInfo;
 import org.prebid.server.cookie.UidsCookie;
 import org.prebid.server.currency.CurrencyConversionService;
 import org.prebid.server.exception.PreBidException;
 import org.prebid.server.execution.Timeout;
-import org.prebid.server.gdpr.GdprService;
-import org.prebid.server.gdpr.model.GdprResponse;
+import org.prebid.server.json.JacksonMapper;
 import org.prebid.server.metric.MetricName;
 import org.prebid.server.metric.Metrics;
-import org.prebid.server.metric.model.MetricsContext;
 import org.prebid.server.proto.openrtb.ext.ExtPrebid;
+import org.prebid.server.proto.openrtb.ext.ExtPrebidBidders;
+import org.prebid.server.proto.openrtb.ext.request.ExtApp;
 import org.prebid.server.proto.openrtb.ext.request.ExtBidRequest;
-import org.prebid.server.proto.openrtb.ext.request.ExtPriceGranularity;
-import org.prebid.server.proto.openrtb.ext.request.ExtRegs;
+import org.prebid.server.proto.openrtb.ext.request.ExtRequestCurrency;
 import org.prebid.server.proto.openrtb.ext.request.ExtRequestPrebid;
 import org.prebid.server.proto.openrtb.ext.request.ExtRequestPrebidCache;
+import org.prebid.server.proto.openrtb.ext.request.ExtRequestPrebidData;
+import org.prebid.server.proto.openrtb.ext.request.ExtRequestPrebidSchain;
 import org.prebid.server.proto.openrtb.ext.request.ExtRequestTargeting;
+import org.prebid.server.proto.openrtb.ext.request.ExtSite;
+import org.prebid.server.proto.openrtb.ext.request.ExtSource;
 import org.prebid.server.proto.openrtb.ext.request.ExtUser;
-import org.prebid.server.proto.openrtb.ext.response.CacheAsset;
-import org.prebid.server.proto.openrtb.ext.response.ExtBidPrebid;
-import org.prebid.server.proto.openrtb.ext.response.ExtBidResponse;
-import org.prebid.server.proto.openrtb.ext.response.ExtBidderError;
-import org.prebid.server.proto.openrtb.ext.response.ExtHttpCall;
-import org.prebid.server.proto.openrtb.ext.response.ExtResponseCache;
-import org.prebid.server.proto.openrtb.ext.response.ExtResponseDebug;
-import org.prebid.server.proto.response.BidderInfo;
+import org.prebid.server.settings.model.Account;
 import org.prebid.server.validation.ResponseBidValidator;
 import org.prebid.server.validation.model.ValidationResult;
 
 import java.math.BigDecimal;
-import java.text.DecimalFormat;
-import java.text.DecimalFormatSymbols;
 import java.time.Clock;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.Iterator;
-import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Set;
-import java.util.function.Function;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import java.util.stream.StreamSupport;
@@ -89,50 +74,66 @@ import java.util.stream.StreamSupport;
 public class ExchangeService {
 
     private static final String PREBID_EXT = "prebid";
-    private static final String CACHE = "cache";
-    private static final String DEFAULT_CURRENCY = "USD";
-    private static final BigDecimal THOUSAND = BigDecimal.valueOf(1000);
-    private static final DecimalFormat ROUND_TWO_DECIMALS =
-            new DecimalFormat("###.##", DecimalFormatSymbols.getInstance(Locale.US));
+    private static final String CONTEXT_EXT = "context";
 
+    private static final BigDecimal THOUSAND = BigDecimal.valueOf(1000);
+    private static final String GENERIC_SCHAIN_KEY = "*";
+
+    private final long expectedCacheTime;
     private final BidderCatalog bidderCatalog;
+    private final StoredResponseProcessor storedResponseProcessor;
+    private final PrivacyEnforcementService privacyEnforcementService;
+    private final HttpBidderRequester httpBidderRequester;
     private final ResponseBidValidator responseBidValidator;
-    private final CacheService cacheService;
-    private final BidResponsePostProcessor bidResponsePostProcessor;
     private final CurrencyConversionService currencyService;
-    private final GdprService gdprService;
+    private final BidResponseCreator bidResponseCreator;
+    private final BidResponsePostProcessor bidResponsePostProcessor;
     private final Metrics metrics;
     private final Clock clock;
-    private final boolean useGeoLocation;
-    private final long expectedCacheTime;
+    private final JacksonMapper mapper;
 
-    public ExchangeService(BidderCatalog bidderCatalog,
-                           ResponseBidValidator responseBidValidator, CacheService cacheService,
+    public ExchangeService(long expectedCacheTime,
+                           BidderCatalog bidderCatalog,
+                           StoredResponseProcessor storedResponseProcessor,
+                           PrivacyEnforcementService privacyEnforcementService,
+                           HttpBidderRequester httpBidderRequester,
+                           ResponseBidValidator responseBidValidator,
+                           CurrencyConversionService currencyService,
+                           BidResponseCreator bidResponseCreator,
                            BidResponsePostProcessor bidResponsePostProcessor,
-                           CurrencyConversionService currencyService, GdprService gdprService,
-                           Metrics metrics, Clock clock, boolean useGeoLocation, long expectedCacheTime) {
+                           Metrics metrics,
+                           Clock clock,
+                           JacksonMapper mapper) {
+
         if (expectedCacheTime < 0) {
             throw new IllegalArgumentException("Expected cache time should be positive");
         }
+        this.expectedCacheTime = expectedCacheTime;
         this.bidderCatalog = Objects.requireNonNull(bidderCatalog);
+        this.storedResponseProcessor = Objects.requireNonNull(storedResponseProcessor);
+        this.privacyEnforcementService = Objects.requireNonNull(privacyEnforcementService);
+        this.httpBidderRequester = Objects.requireNonNull(httpBidderRequester);
         this.responseBidValidator = Objects.requireNonNull(responseBidValidator);
-        this.cacheService = Objects.requireNonNull(cacheService);
         this.currencyService = Objects.requireNonNull(currencyService);
+        this.bidResponseCreator = Objects.requireNonNull(bidResponseCreator);
         this.bidResponsePostProcessor = Objects.requireNonNull(bidResponsePostProcessor);
-        this.gdprService = gdprService;
         this.metrics = Objects.requireNonNull(metrics);
         this.clock = Objects.requireNonNull(clock);
-        this.useGeoLocation = useGeoLocation;
-        this.expectedCacheTime = expectedCacheTime;
+        this.mapper = Objects.requireNonNull(mapper);
     }
 
     /**
      * Runs an auction: delegates request to applicable bidders, gathers responses from them and constructs final
      * response containing returned bids and additional information in extensions.
      */
-    public Future<BidResponse> holdAuction(BidRequest bidRequest, UidsCookie uidsCookie, Timeout timeout,
-                                           MetricsContext metricsContext, RoutingContext context) {
-        // extract ext from bid request
+    public Future<BidResponse> holdAuction(AuctionContext context) {
+        final RoutingContext routingContext = context.getRoutingContext();
+        final UidsCookie uidsCookie = context.getUidsCookie();
+        final BidRequest bidRequest = context.getBidRequest();
+        final Timeout timeout = context.getTimeout();
+        final MetricName requestTypeMetric = context.getRequestTypeMetric();
+        final Account account = context.getAccount();
+
         final ExtBidRequest requestExt;
         try {
             requestExt = requestExt(bidRequest);
@@ -140,39 +141,49 @@ public class ExchangeService {
             return Future.failedFuture(e);
         }
 
+        final List<Imp> imps = bidRequest.getImp();
+        final List<SeatBid> storedResponse = new ArrayList<>();
         final Map<String, String> aliases = aliases(requestExt);
+        final String publisherId = account.getId();
+        final Boolean isGdprEnforced = account.getEnforceGdpr();
         final ExtRequestTargeting targeting = targeting(requestExt);
         final BidRequestCacheInfo cacheInfo = bidRequestCacheInfo(targeting, requestExt);
-        final TargetingKeywordsCreator keywordsCreator = keywordsCreator(targeting, bidRequest.getApp() != null);
-        final String publisherId = publisherId(bidRequest);
+        final boolean debugEnabled = isDebugEnabled(bidRequest, requestExt);
 
-        final long startTime = clock.millis();
-
-        return extractBidderRequests(bidRequest, uidsCookie, aliases, timeout)
+        return storedResponseProcessor.getStoredResponseResult(imps, aliases, timeout)
+                .map(storedResponseResult -> populateStoredResponse(storedResponseResult, storedResponse))
+                .compose(impsRequiredRequest ->
+                        extractBidderRequests(context, impsRequiredRequest, requestExt, aliases, isGdprEnforced))
                 .map(bidderRequests ->
-                        updateRequestMetric(bidderRequests, uidsCookie, aliases, publisherId, metricsContext))
+                        updateRequestMetric(bidderRequests, uidsCookie, aliases, publisherId, requestTypeMetric))
                 .compose(bidderRequests -> CompositeFuture.join(bidderRequests.stream()
-                        .map(bidderRequest -> requestBids(bidderRequest, startTime,
-                                auctionTimeout(timeout, cacheInfo.doCaching), aliases, bidAdjustments(requestExt),
-                                currencyRates(targeting)))
+                        .map(bidderRequest -> requestBids(bidderRequest,
+                                auctionTimeout(timeout, cacheInfo.isDoCaching()), debugEnabled, aliases,
+                                bidAdjustments(requestExt), currencyRates(requestExt)))
                         .collect(Collectors.toList())))
                 // send all the requests to the bidders and gathers results
                 .map(CompositeFuture::<BidderResponse>list)
                 // produce response from bidder results
                 .map(bidderResponses -> updateMetricsFromResponses(bidderResponses, publisherId))
-                .compose(result ->
-                        toBidResponse(result, bidRequest, keywordsCreator, cacheInfo, publisherId, timeout))
+                .map(bidderResponses ->
+                        storedResponseProcessor.mergeWithBidderResponses(bidderResponses, storedResponse, imps))
+                .compose(bidderResponses ->
+                        bidResponseCreator.create(bidderResponses, bidRequest, targeting, cacheInfo, account,
+                                eventsAllowedByRequest(requestExt), auctionTimestamp(requestExt), debugEnabled,
+                                timeout))
                 .compose(bidResponse ->
-                        bidResponsePostProcessor.postProcess(context, uidsCookie, bidRequest, bidResponse));
+                        bidResponsePostProcessor.postProcess(routingContext, uidsCookie, bidRequest, bidResponse,
+                                account));
     }
 
     /**
-     * Extracts {@link ExtBidRequest} from bid request.
+     * Extracts {@link ExtBidRequest} from {@link BidRequest}.
      */
-    private static ExtBidRequest requestExt(BidRequest bidRequest) {
+    private ExtBidRequest requestExt(BidRequest bidRequest) {
         try {
             return bidRequest.getExt() != null
-                    ? Json.mapper.treeToValue(bidRequest.getExt(), ExtBidRequest.class) : null;
+                    ? mapper.mapper().treeToValue(bidRequest.getExt(), ExtBidRequest.class)
+                    : null;
         } catch (JsonProcessingException e) {
             throw new PreBidException(String.format("Error decoding bidRequest.ext: %s", e.getMessage()), e);
         }
@@ -188,394 +199,38 @@ public class ExchangeService {
     }
 
     /**
-     * Extracts publisher id either from {@link BidRequest}.app.publisher.id or {@link BidRequest}.site.publisher.id.
-     * If neither is present returns empty string.
-     */
-    private static String publisherId(BidRequest bidRequest) {
-        final App app = bidRequest.getApp();
-        final Publisher appPublisher = app != null ? app.getPublisher() : null;
-        final Site site = bidRequest.getSite();
-        final Publisher sitePublisher = site != null ? site.getPublisher() : null;
-
-        final Publisher publisher = ObjectUtils.firstNonNull(appPublisher, sitePublisher);
-
-        final String publisherId = publisher != null ? publisher.getId() : null;
-        return ObjectUtils.defaultIfNull(publisherId, StringUtils.EMPTY);
-    }
-
-    /**
-     * Extracts bidAdjustments from {@link ExtBidRequest}.
-     */
-    private static Map<String, BigDecimal> bidAdjustments(ExtBidRequest requestExt) {
-        final ExtRequestPrebid prebid = requestExt != null ? requestExt.getPrebid() : null;
-        final Map<String, BigDecimal> bidAdjustmentFactors = prebid != null ? prebid.getBidadjustmentfactors() : null;
-        return bidAdjustmentFactors != null ? bidAdjustmentFactors : Collections.emptyMap();
-    }
-
-    /**
-     * Extracts currency rates from {@link ExtRequestTargeting}
-     */
-    private static Map<String, Map<String, BigDecimal>> currencyRates(ExtRequestTargeting targeting) {
-        return targeting != null && targeting.getCurrency() != null ? targeting.getCurrency().getRates() : null;
-    }
-
-    /**
-     * Takes an OpenRTB request and returns the OpenRTB requests sanitized for each bidder.
-     * <p>
-     * This will copy the {@link BidRequest} into a list of requests, where the {@link BidRequest}.imp[].ext field
-     * will only consist of the "prebid" field and the field for the appropriate bidder parameters. We will drop all
-     * extended fields beyond this context, so this will not be compatible with any other uses of the extension area
-     * i.e. the bidders will not see any other extension fields. If Imp extension name is alias, which is also defined
-     * in BidRequest.ext.prebid.aliases and valid, separate {@link BidRequest} will be created for this alias and sent
-     * to appropriate bidder.
-     * For example suppose {@link BidRequest} has two {@link Imp}s. First one with imp.ext[].rubicon and
-     * imp.ext[].rubiconAlias and second with imp.ext[].appnexus and imp.ext[].rubicon. Three {@link BidRequest}s will
-     * be created:
-     * 1. {@link BidRequest} with one {@link Imp}, where bidder extension points to rubiconAlias extension and will be
-     * sent to Rubicon bidder.
-     * 2. {@link BidRequest} with two {@link Imp}s, where bidder extension points to appropriate rubicon extension from
-     * original {@link BidRequest} and will be sent to Rubicon bidder.
-     * 3. {@link BidRequest} with one {@link Imp}, where bidder extension points to appnexus extension and will be sent
-     * to Appnexus bidder.
-     * <p>
-     * Each of the created {@link BidRequest}s will have bidrequest.user.buyerid field populated with the value from
-     * bidrequest.user.ext.prebid.buyerids or {@link UidsCookie} corresponding to bidder's family name unless buyerid
-     * is already in the original OpenRTB request (in this case it will not be overridden).
-     * In case if bidrequest.user.ext.prebid.buyerids contains values after extracting those values it will be cleared
-     * in order to avoid leaking of buyerids across bidders.
-     * <p>
-     * NOTE: the return list will only contain entries for bidders that both have the extension field in at least one
-     * {@link Imp}, and are known to {@link BidderCatalog} or aliases from {@link BidRequest}.ext.prebid.aliases.
-     */
-    private Future<List<BidderRequest>> extractBidderRequests(BidRequest bidRequest, UidsCookie uidsCookie,
-                                                              Map<String, String> aliases,
-                                                              Timeout timeout) {
-        // sanity check: discard imps without extension
-        final List<Imp> imps = bidRequest.getImp().stream()
-                .filter(imp -> imp.getExt() != null)
-                .collect(Collectors.toList());
-
-        // identify valid bidders and aliases out of imps
-        final List<String> bidders = imps.stream()
-                .flatMap(imp -> asStream(imp.getExt().fieldNames())
-                        .filter(bidder -> !Objects.equals(bidder, PREBID_EXT))
-                        .filter(bidder -> isValidBidder(bidder, aliases)))
-                .distinct()
-                .collect(Collectors.toList());
-
-        final User user = bidRequest.getUser();
-        final ExtUser extUser = extUser(user);
-        final Map<String, String> uidsBody = uidsFromBody(extUser);
-
-        final ObjectNode userExtNode = removeBuyeruidsFromUserExtPrebid(extUser);
-        final ExtRegs extRegs = extRegs(bidRequest.getRegs());
-
-        return getVendorsToGdprPermission(bidRequest, bidders, extUser, aliases, extRegs, timeout)
-                .map(gdprResponse -> makeBidderRequests(bidders, bidRequest, uidsBody, uidsCookie,
-                        userExtNode, extRegs, aliases, imps, gdprResponse.getVendorsToGdpr()));
-    }
-
-    /**
-     * Checks if bidder name is valid in case when bidder can also be alias name.
-     */
-    private boolean isValidBidder(String bidder, Map<String, String> aliases) {
-        return bidderCatalog.isValidName(bidder) || aliases.containsKey(bidder);
-    }
-
-    /**
-     * Returns {@link Future&lt;{@link Map}&lt;{@link Integer}, {@link Boolean}&gt;&gt;}, where bidders vendor id mapped
-     * to enabling or disabling gdpr in scope of pbs server. If bidder vendor id is not present in map, it means that
-     * pbs not enforced particular bidder to follow pbs gdpr procedure.
-     */
-    private Future<GdprResponse> getVendorsToGdprPermission(BidRequest bidRequest, List<String> bidders,
-                                                            ExtUser extUser, Map<String, String> aliases,
-                                                            ExtRegs extRegs, Timeout timeout) {
-        final Set<Integer> gdprEnforcedVendorIds = extractGdprEnforcedVendors(bidders, aliases);
-        if (gdprEnforcedVendorIds.isEmpty()) {
-            return Future.succeededFuture(GdprResponse.of(Collections.emptyMap(), null));
-        }
-
-        final Integer gdpr = extRegs != null ? extRegs.getGdpr() : null;
-        final String gdprConsent = extUser != null ? extUser.getConsent() : null;
-        final Device device = bidRequest.getDevice();
-        final String ipAddress = useGeoLocation && device != null ? device.getIp() : null;
-
-        return gdprService.resultByVendor(gdprEnforcedVendorIds, gdpr != null ? gdpr.toString() : null,
-                gdprConsent, ipAddress, timeout);
-    }
-
-    /**
-     * Splits the input request into requests which are sanitized for each bidder. Intended behavior is:
-     * <p>
-     * - bidrequest.imp[].ext will only contain the "prebid" field and a "bidder" field which has the params for
-     * the intended Bidder.
-     * <p>
-     * - bidrequest.user.buyeruid will be set to that Bidder's ID.
-     */
-    private List<BidderRequest> makeBidderRequests(List<String> bidders, BidRequest bidRequest,
-                                                   Map<String, String> uidsBody, UidsCookie uidsCookie,
-                                                   ObjectNode userExtNode, ExtRegs extRegs, Map<String, String> aliases,
-                                                   List<Imp> imps, Map<Integer, Boolean> vendorsToGdpr) {
-
-        final Map<String, Boolean> bidderToMaskingRequired = bidders.stream()
-                .collect(Collectors.toMap(Function.identity(),
-                        bidder -> isMaskingRequiredBidder(vendorsToGdpr, bidder, aliases)));
-
-        final List<BidderRequest> bidderRequests = bidders.stream()
-                // for each bidder create a new request that is a copy of original request except buyerid and imp
-                // extensions
-                .map(bidder -> BidderRequest.of(bidder, bidRequest.toBuilder()
-                        .user(prepareUser(bidder, bidRequest, uidsBody, uidsCookie, userExtNode, aliases,
-                                bidderToMaskingRequired.get(bidder)))
-                        .device(prepareDevice(bidRequest.getDevice(), bidderToMaskingRequired.get(bidder)))
-                        .regs(prepareRegs(bidRequest.getRegs(), extRegs, bidderToMaskingRequired.get(bidder)))
-                        .imp(prepareImps(bidder, imps))
-                        .build()))
-                .collect(Collectors.toList());
-
-        // randomize the list to make the auction more fair
-        Collections.shuffle(bidderRequests);
-
-        return bidderRequests;
-    }
-
-    /**
-     * Returns flag if masking is required for bidder.
-     */
-    private boolean isMaskingRequiredBidder(Map<Integer, Boolean> vendorToGdprPermission, String bidder,
-                                            Map<String, String> aliases) {
-        final boolean maskingRequired;
-        if (vendorToGdprPermission.isEmpty()) {
-            maskingRequired = false;
-        } else {
-            final String resolvedBidderName = resolveBidder(bidder, aliases);
-            final Boolean gdprAllowsUserData = vendorToGdprPermission.get(
-                    bidderCatalog.metaInfoByName(resolvedBidderName).info().getGdpr().getVendorId());
-
-            // if bidder was not found in vendorToGdprPermission, it means that it was not pbs enforced for gdpr, so
-            // request for this bidder should be sent without changes
-            maskingRequired = gdprAllowsUserData != null && !gdprAllowsUserData;
-
-            if (maskingRequired) {
-                metrics.updateGdprMaskedMetric(resolvedBidderName);
-            }
-        }
-        return maskingRequired;
-    }
-
-    /**
-     * Extracts {@link ExtRegs} from {@link Regs}.
-     */
-    private static ExtRegs extRegs(Regs regs) {
-        final ObjectNode regsExt = regs != null ? regs.getExt() : null;
-        if (regsExt != null) {
-            try {
-                return Json.mapper.treeToValue(regs.getExt(), ExtRegs.class);
-            } catch (JsonProcessingException e) {
-                throw new PreBidException(String.format("Error decoding bidRequest.regs.ext: %s", e.getMessage()), e);
-            }
-        }
-        return null;
-    }
-
-    /**
-     * Extracts pbs gdpr enforced vendor ids.
-     */
-    private Set<Integer> extractGdprEnforcedVendors(List<String> bidders, Map<String, String> aliases) {
-        return bidders.stream()
-                .map(bidder -> bidderCatalog.metaInfoByName(resolveBidder(bidder, aliases)).info().getGdpr())
-                .filter(BidderInfo.GdprInfo::isEnforced)
-                .map(BidderInfo.GdprInfo::getVendorId)
-                .collect(Collectors.toSet());
-    }
-
-    private static <T> Stream<T> asStream(Iterator<T> iterator) {
-        final Iterable<T> iterable = () -> iterator;
-        return StreamSupport.stream(iterable.spliterator(), false);
-    }
-
-    /**
-     * Extracts {@link ExtUser} from {@link User} or returns null if not presents.
-     */
-    private static ExtUser extUser(User user) {
-        final ObjectNode userExt = user != null ? user.getExt() : null;
-        if (userExt != null) {
-            try {
-                return Json.mapper.treeToValue(userExt, ExtUser.class);
-            } catch (JsonProcessingException e) {
-                throw new PreBidException(String.format("Error decoding bidRequest.user.ext: %s", e.getMessage()), e);
-            }
-        }
-        return null;
-    }
-
-    /**
-     * Returns 'explicit' UIDs from request body.
-     */
-    private static Map<String, String> uidsFromBody(ExtUser extUser) {
-        return extUser != null && extUser.getPrebid() != null
-                // as long as ext.prebid exists we are guaranteed that user.ext.prebid.buyeruids also exists
-                ? extUser.getPrebid().getBuyeruids()
-                : Collections.emptyMap();
-    }
-
-    /**
-     * Returns json encoded {@link ExtUser} without 'request.user.ext.prebid.buyeruids'
-     * to avoid leaking of buyeruids across bidders.
-     */
-    private static ObjectNode removeBuyeruidsFromUserExtPrebid(ExtUser extUser) {
-        return extUser != null
-                ? Json.mapper.valueToTree(ExtUser.of(null, extUser.getConsent(), extUser.getDigitrust()))
-                : null;
-    }
-
-    /**
-     * Returns the name associated with bidder if bidder is an alias.
-     * If it's not an alias, the bidder is returned.
-     */
-    private static String resolveBidder(String bidder, Map<String, String> aliases) {
-        return aliases.getOrDefault(bidder, bidder);
-    }
-
-    /**
-     * Returns original {@link User} (if 'user.buyeruid' already contains uid value for bidder or passed buyerUid and
-     * updatedUserExt are empty otherwise returns new {@link User} containing updatedUserExt and buyerUid
-     * (which means request contains 'explicit' buyeruid in 'request.user.ext.buyerids' or uidsCookie).
-     */
-    private User prepareUser(String bidder, BidRequest bidRequest, Map<String, String> uidsBody, UidsCookie uidsCookie,
-                             ObjectNode updatedUserExt, Map<String, String> aliases, Boolean maskingRequired) {
-
-        final User user = bidRequest.getUser();
-        final User.UserBuilder builder = user != null ? user.toBuilder() : User.builder();
-
-        // clean buyeruid from user and user.ext.prebid
-        if (maskingRequired) {
-            return builder
-                    .buyeruid(null)
-                    .geo(user != null ? maskGeo(user.getGeo()) : null)
-                    .ext(updatedUserExt)
-                    .build();
-        }
-
-        final String resolvedBidder = resolveBidder(bidder, aliases);
-        final String buyerUid = extractUid(uidsBody, uidsCookie, resolvedBidder);
-
-        if (updatedUserExt == null && StringUtils.isBlank(buyerUid)) {
-            return user;
-        }
-
-        if (user == null || StringUtils.isBlank(user.getBuyeruid()) && StringUtils.isNotBlank(buyerUid)) {
-            builder.buyeruid(buyerUid);
-        }
-        if (updatedUserExt != null) {
-            builder.ext(updatedUserExt);
-        }
-        return builder.build();
-    }
-
-    /**
-     * Prepared device for each bidder depends on gdpr enabling.
-     */
-    private static Device prepareDevice(Device device, Boolean maskingRequired) {
-        return device != null && maskingRequired
-                ? device.toBuilder().ip(maskIp(device.getIp(), '.')).ipv6(maskIp(device.getIpv6(), ':'))
-                .geo(maskGeo(device.getGeo()))
-                // suppress device information affected by gdpr
-                .ifa(null).macsha1(null).macmd5(null).dpidsha1(null).dpidmd5(null).didsha1(null).didmd5(null)
-                .build()
-                : device;
-    }
-
-    /**
-     * Sets gdpr value 1, if bidder required gdpr masking, but gdpr value in regs extension is not defined
-     */
-    private static Regs prepareRegs(Regs regs, ExtRegs extRegs, Boolean maskingRequired) {
-        if (maskingRequired) {
-            if (extRegs == null) {
-                return Regs.of(regs != null ? regs.getCoppa() : null, Json.mapper.valueToTree(ExtRegs.of(1)));
-            } else {
-                return Regs.of(regs.getCoppa(), Json.mapper.valueToTree(ExtRegs.of(1)));
-            }
-        }
-        return regs;
-    }
-
-    /**
-     * Masks ip address by replacing bits after last separator with zeros.
-     */
-    private static String maskIp(String value, char delimiter) {
-        if (StringUtils.isNotEmpty(value)) {
-            final int lastIndexOfDelimiter = value.lastIndexOf(delimiter);
-            return value.substring(0, lastIndexOfDelimiter + 1)
-                    + StringUtils.repeat('0', value.length() - lastIndexOfDelimiter - 1);
-        }
-        return value;
-    }
-
-    /**
-     * Masks {@link Geo} by rounding lon and lat properties to two decimals.
-     */
-    private static Geo maskGeo(Geo geo) {
-        final boolean isNotNullGeo = geo != null;
-        final Float lon = isNotNullGeo ? geo.getLon() : null;
-        final Float lat = isNotNullGeo ? geo.getLat() : null;
-        return isNotNullGeo
-                ? geo.toBuilder()
-                .lon(lon != null ? Float.valueOf(ROUND_TWO_DECIMALS.format(lon)) : null)
-                .lat(lat != null ? Float.valueOf(ROUND_TWO_DECIMALS.format(lat)) : null)
-                .build()
-                : null;
-    }
-
-    private List<Imp> prepareImps(String bidder, List<Imp> imps) {
-        return imps.stream()
-                .filter(imp -> imp.getExt().hasNonNull(bidder))
-                // for each imp create a new imp with extension crafted to contain only "prebid" and
-                // bidder-specific extensions
-                .map(imp -> imp.toBuilder()
-                        .ext(Json.mapper.valueToTree(
-                                extractBidderExt(bidder, imp.getExt())))
-                        .build())
-                .collect(Collectors.toList());
-    }
-
-    /**
-     * Extracts UID from uids from body or {@link UidsCookie}. If absent returns null.
-     */
-    private String extractUid(Map<String, String> uidsBody, UidsCookie uidsCookie, String bidder) {
-        final String uid = uidsBody.get(bidder);
-        return StringUtils.isNotBlank(uid)
-                ? uid
-                : uidsCookie.uidFrom(bidderCatalog.usersyncerByName(bidder).cookieFamilyName());
-    }
-
-    /**
-     * Updates 'account.*.request', 'request' and 'no_cookie_requests' metrics for each {@link BidderRequest}
-     */
-    private List<BidderRequest> updateRequestMetric(List<BidderRequest> bidderRequests, UidsCookie uidsCookie,
-                                                    Map<String, String> aliases, String publisherId,
-                                                    MetricsContext metricsContext) {
-        final MetricName requestType = metricsContext.getRequestType();
-
-        metrics.updateAccountRequestMetrics(publisherId, requestType);
-
-        for (BidderRequest bidderRequest : bidderRequests) {
-            final String bidder = resolveBidder(bidderRequest.getBidder(), aliases);
-            final boolean isApp = bidderRequest.getBidRequest().getApp() != null;
-            final boolean noBuyerId = !bidderCatalog.isValidName(bidder) || StringUtils.isBlank(
-                    uidsCookie.uidFrom(bidderCatalog.usersyncerByName(bidder).cookieFamilyName()));
-
-            metrics.updateAdapterRequestTypeAndNoCookieMetrics(bidder, requestType, !isApp && noBuyerId);
-        }
-        return bidderRequests;
-    }
-
-    /**
      * Extracts {@link ExtRequestTargeting} from {@link ExtBidRequest} model.
      */
     private static ExtRequestTargeting targeting(ExtBidRequest requestExt) {
         final ExtRequestPrebid prebid = requestExt != null ? requestExt.getPrebid() : null;
         return prebid != null ? prebid.getTargeting() : null;
+    }
+
+    /**
+     * Extracts currency rates from {@link ExtBidRequest}.
+     */
+    private static Map<String, Map<String, BigDecimal>> currencyRates(ExtBidRequest requestExt) {
+        final ExtRequestPrebid prebid = requestExt != null ? requestExt.getPrebid() : null;
+        final ExtRequestCurrency currency = prebid != null ? prebid.getCurrency() : null;
+        return currency != null ? currency.getRates() : null;
+    }
+
+    /**
+     * Returns true if {@link ExtBidRequest} is present, otherwise - false.
+     */
+    private static boolean eventsAllowedByRequest(ExtBidRequest requestExt) {
+        final ExtRequestPrebid prebid = requestExt != null ? requestExt.getPrebid() : null;
+        final ObjectNode eventsFromRequest = prebid != null ? prebid.getEvents() : null;
+        return eventsFromRequest != null;
+    }
+
+    /**
+     * Extracts auction timestamp from {@link ExtBidRequest} or get it from {@link Clock} if it is null.
+     */
+    private long auctionTimestamp(ExtBidRequest requestExt) {
+        final ExtRequestPrebid prebid = requestExt != null ? requestExt.getPrebid() : null;
+        final Long auctionTimestamp = prebid != null ? prebid.getAuctiontimestamp() : null;
+        return auctionTimestamp != null ? auctionTimestamp : clock.millis();
     }
 
     /**
@@ -588,8 +243,11 @@ public class ExchangeService {
         if (targeting != null && cache != null) {
             final boolean shouldCacheBids = cache.getBids() != null;
             final boolean shouldCacheVideoBids = cache.getVastxml() != null;
+            final boolean shouldCacheWinningBidsOnly = targeting.getIncludebidderkeys()
+                    ? false // ext.prebid.targeting.includebidderkeys takes precedence
+                    : ObjectUtils.defaultIfNull(cache.getWinningonly(), false);
 
-            if (shouldCacheBids || shouldCacheVideoBids) {
+            if (shouldCacheBids || shouldCacheVideoBids || shouldCacheWinningBidsOnly) {
                 final Integer cacheBidsTtl = shouldCacheBids ? cache.getBids().getTtlseconds() : null;
                 final Integer cacheVideoBidsTtl = shouldCacheVideoBids ? cache.getVastxml().getTtlseconds() : null;
 
@@ -608,6 +266,7 @@ public class ExchangeService {
                         .cacheVideoBidsTtl(cacheVideoBidsTtl)
                         .returnCreativeBids(returnCreativeBid)
                         .returnCreativeVideoBids(returnCreativeVideoBid)
+                        .shouldCacheWinningBidsOnly(shouldCacheWinningBidsOnly)
                         .build();
             }
         }
@@ -616,59 +275,517 @@ public class ExchangeService {
     }
 
     /**
-     * Extracts targeting keywords settings from the bid request and creates {@link TargetingKeywordsCreator}
-     * instance if they are present.
-     * <p>
-     * Returns null if bidrequest.ext.prebid.targeting is missing - it means that no targeting keywords
-     * should be included in bid response.
+     * Determines debug flag from {@link BidRequest} or {@link ExtBidRequest}.
      */
-    private static TargetingKeywordsCreator keywordsCreator(ExtRequestTargeting targeting, boolean isApp) {
-        return targeting != null
-                ? TargetingKeywordsCreator.create(parsePriceGranularity(targeting.getPricegranularity()),
-                targeting.getIncludewinners(), targeting.getIncludebidderkeys(), isApp)
+    private static boolean isDebugEnabled(BidRequest bidRequest, ExtBidRequest extBidRequest) {
+        if (Objects.equals(bidRequest.getTest(), 1)) {
+            return true;
+        }
+        final ExtRequestPrebid extRequestPrebid = extBidRequest != null ? extBidRequest.getPrebid() : null;
+        return extRequestPrebid != null && Objects.equals(extRequestPrebid.getDebug(), 1);
+    }
+
+    /**
+     * Populates storedResponse parameter with stored {@link List<SeatBid>} and returns {@link List<Imp>} for which
+     * request to bidders should be performed.
+     */
+    private static List<Imp> populateStoredResponse(StoredResponseResult storedResponseResult,
+                                                    List<SeatBid> storedResponse) {
+        storedResponse.addAll(storedResponseResult.getStoredResponse());
+        return storedResponseResult.getRequiredRequestImps();
+    }
+
+    /**
+     * Takes an OpenRTB request and returns the OpenRTB requests sanitized for each bidder.
+     * <p>
+     * This will copy the {@link BidRequest} into a list of requests, where the bidRequest.imp[].ext field
+     * will only consist of the "prebid" field and the field for the appropriate bidder parameters. We will drop all
+     * extended fields beyond this context, so this will not be compatible with any other uses of the extension area
+     * i.e. the bidders will not see any other extension fields. If Imp extension name is alias, which is also defined
+     * in bidRequest.ext.prebid.aliases and valid, separate {@link BidRequest} will be created for this alias and sent
+     * to appropriate bidder.
+     * For example suppose {@link BidRequest} has two {@link Imp}s. First one with imp.ext[].rubicon and
+     * imp.ext[].rubiconAlias and second with imp.ext[].appnexus and imp.ext[].rubicon. Three {@link BidRequest}s will
+     * be created:
+     * 1. {@link BidRequest} with one {@link Imp}, where bidder extension points to rubiconAlias extension and will be
+     * sent to Rubicon bidder.
+     * 2. {@link BidRequest} with two {@link Imp}s, where bidder extension points to appropriate rubicon extension from
+     * original {@link BidRequest} and will be sent to Rubicon bidder.
+     * 3. {@link BidRequest} with one {@link Imp}, where bidder extension points to appnexus extension and will be sent
+     * to Appnexus bidder.
+     * <p>
+     * Each of the created {@link BidRequest}s will have bidrequest.user.buyerid field populated with the value from
+     * bidrequest.user.ext.prebid.buyerids or {@link UidsCookie} corresponding to bidder's family name unless buyerid
+     * is already in the original OpenRTB request (in this case it will not be overridden).
+     * In case if bidrequest.user.ext.prebid.buyerids contains values after extracting those values it will be cleared
+     * in order to avoid leaking of buyerids across bidders.
+     * <p>
+     * NOTE: the return list will only contain entries for bidders that both have the extension field in at least one
+     * {@link Imp}, and are known to {@link BidderCatalog} or aliases from bidRequest.ext.prebid.aliases.
+     */
+    private Future<List<BidderRequest>> extractBidderRequests(AuctionContext context, List<Imp> requestedImps,
+                                                              ExtBidRequest requestExt, Map<String, String> aliases,
+                                                              Boolean isGdprEnforced) {
+        // sanity check: discard imps without extension
+        final List<Imp> imps = requestedImps.stream()
+                .filter(imp -> imp.getExt() != null)
+                .collect(Collectors.toList());
+
+        // identify valid bidders and aliases out of imps
+        final List<String> bidders = imps.stream()
+                .flatMap(imp -> asStream(imp.getExt().fieldNames())
+                        .filter(bidder -> !Objects.equals(bidder, PREBID_EXT) && !Objects.equals(bidder, CONTEXT_EXT))
+                        .filter(bidder -> isValidBidder(bidder, aliases)))
+                .distinct()
+                .collect(Collectors.toList());
+
+        return makeBidderRequests(bidders, context, aliases, requestExt, imps, isGdprEnforced);
+    }
+
+    private static <T> Stream<T> asStream(Iterator<T> iterator) {
+        final Iterable<T> iterable = () -> iterator;
+        return StreamSupport.stream(iterable.spliterator(), false);
+    }
+
+    /**
+     * Checks if bidder name is valid in case when bidder can also be alias name.
+     */
+    private boolean isValidBidder(String bidder, Map<String, String> aliases) {
+        return bidderCatalog.isValidName(bidder) || aliases.containsKey(bidder);
+    }
+
+    /**
+     * Splits the input request into requests which are sanitized for each bidder. Intended behavior is:
+     * <p>
+     * - bidrequest.imp[].ext will only contain the "prebid" field and a "bidder" field which has the params for
+     * the intended Bidder.
+     * <p>
+     * - bidrequest.user.buyeruid will be set to that Bidder's ID.
+     * <p>
+     * - bidrequest.ext.prebid.data.bidders will be removed.
+     * <p>
+     * - bidrequest.ext.prebid.bidders will be staying in corresponding bidder only.
+     * <p>
+     * - bidrequest.user.ext.data, bidrequest.app.ext.data and bidrequest.site.ext.data will be removed for bidders
+     * that don't have first party data allowed.
+     */
+    private Future<List<BidderRequest>> makeBidderRequests(
+            List<String> bidders, AuctionContext context, Map<String, String> aliases,
+            ExtBidRequest requestExt, List<Imp> imps, Boolean isGdprEnforced) {
+
+        final BidRequest bidRequest = context.getBidRequest();
+        final ExtUser extUser = extUser(bidRequest.getUser());
+        final Map<String, String> uidsBody = uidsFromBody(extUser);
+
+        final List<String> firstPartyDataBidders = firstPartyDataBidders(requestExt);
+
+        final Map<String, User> bidderToUser = new HashMap<>();
+        for (String bidder : bidders) {
+            bidderToUser.put(bidder, prepareUser(bidRequest.getUser(), extUser, bidder, aliases, uidsBody,
+                    context.getUidsCookie(), firstPartyDataBidders.contains(bidder)));
+        }
+
+        return privacyEnforcementService
+                .mask(bidderToUser, extUser, bidders, aliases, bidRequest, isGdprEnforced, context.getTimeout())
+                .map(bidderToPrivacyEnforcementResult -> getBidderRequests(bidderToPrivacyEnforcementResult,
+                        bidRequest, requestExt, imps, firstPartyDataBidders));
+    }
+
+    /**
+     * Extracts {@link ExtUser} from request.user.ext or returns null if not presents.
+     */
+    private ExtUser extUser(User user) {
+        final ObjectNode userExt = user != null ? user.getExt() : null;
+        if (userExt != null) {
+            try {
+                return mapper.mapper().treeToValue(userExt, ExtUser.class);
+            } catch (JsonProcessingException e) {
+                throw new PreBidException(String.format("Error decoding bidRequest.user.ext: %s", e.getMessage()), e);
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Returns UIDs from request.user.ext or empty map if not defined.
+     */
+    private static Map<String, String> uidsFromBody(ExtUser extUser) {
+        return extUser != null && extUser.getPrebid() != null
+                // as long as ext.prebid exists we are guaranteed that user.ext.prebid.buyeruids also exists
+                ? extUser.getPrebid().getBuyeruids()
+                : Collections.emptyMap();
+    }
+
+    /**
+     * Extracts a list of bidders for which first party data is allowed from {@link ExtRequestPrebidData} model.
+     */
+    private static List<String> firstPartyDataBidders(ExtBidRequest requestExt) {
+        final ExtRequestPrebid prebid = requestExt == null ? null : requestExt.getPrebid();
+        final ExtRequestPrebidData data = prebid == null ? null : prebid.getData();
+        final List<String> bidders = data == null ? null : data.getBidders();
+        return ObjectUtils.defaultIfNull(bidders, Collections.emptyList());
+    }
+
+    /**
+     * Returns original {@link User} if user.buyeruid already contains uid value for bidder.
+     * Otherwise, returns new {@link User} containing updated {@link ExtUser} and user.buyeruid.
+     */
+    private User prepareUser(User user, ExtUser extUser, String bidder, Map<String, String> aliases,
+                             Map<String, String> uidsBody, UidsCookie uidsCookie, boolean useFirstPartyData) {
+        final ObjectNode updatedExt = updateUserExt(extUser, useFirstPartyData);
+        final String updatedBuyerUid = updateUserBuyerUid(user, bidder, aliases, uidsBody, uidsCookie);
+
+        if (updatedBuyerUid != null || updatedExt != null) {
+            final User.UserBuilder userBuilder = user == null ? User.builder() : user.toBuilder();
+            if (updatedExt != null) {
+                userBuilder.ext(updatedExt);
+            }
+
+            if (updatedBuyerUid != null) {
+                userBuilder.buyeruid(updatedBuyerUid);
+            }
+            return userBuilder.build();
+        }
+        return user;
+    }
+
+    /**
+     * Returns json encoded {@link ObjectNode} of {@link ExtUser} with changes applied:
+     * <p>
+     * - Removes request.user.ext.prebid.buyeruids to avoid leaking of buyeruids across bidders.
+     * <p>
+     * - Removes request.user.ext.data if bidder doesn't allow first party data to be passed.
+     * <p>
+     * Returns null if {@link ExtUser} doesn't need to be updated.
+     */
+    private ObjectNode updateUserExt(ExtUser extUser, boolean useFirstPartyData) {
+        if (extUser != null) {
+            final boolean removePrebid = extUser.getPrebid() != null;
+            final boolean removeFirstPartyData = !useFirstPartyData && extUser.getData() != null;
+
+            if (removePrebid || removeFirstPartyData) {
+                final ExtUser.ExtUserBuilder builder = extUser.toBuilder();
+
+                if (removePrebid) {
+                    builder.prebid(null);
+                }
+                if (removeFirstPartyData) {
+                    builder.data(null);
+                }
+
+                return mapper.mapper().valueToTree(builder.build());
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Returns updated buyerUid or null if it doesn't need to be updated.
+     */
+    private String updateUserBuyerUid(User user, String bidder, Map<String, String> aliases,
+                                      Map<String, String> uidsBody, UidsCookie uidsCookie) {
+        final String buyerUidFromBodyOrCookie = extractUid(uidsBody, uidsCookie, resolveBidder(bidder, aliases));
+        final String buyerUidFromUser = user != null ? user.getBuyeruid() : null;
+
+        return StringUtils.isBlank(buyerUidFromUser) && StringUtils.isNotBlank(buyerUidFromBodyOrCookie)
+                ? buyerUidFromBodyOrCookie
                 : null;
     }
 
     /**
-     * Parse {@link JsonNode} to {@link List} of {@link ExtPriceGranularity}. Throws {@link PreBidException} in
-     * case of errors during decoding pricegranularity.
+     * Returns the name associated with bidder if bidder is an alias. If it's not an alias, the bidder is returned.
      */
-    private static ExtPriceGranularity parsePriceGranularity(JsonNode priceGranularity) {
-        try {
-            return Json.mapper.treeToValue(priceGranularity, ExtPriceGranularity.class);
-        } catch (JsonProcessingException e) {
-            throw new PreBidException(String.format("Error decoding bidRequest.prebid.targeting.pricegranularity: %s",
-                    e.getMessage()), e);
+    private static String resolveBidder(String bidder, Map<String, String> aliases) {
+        return aliases.getOrDefault(bidder, bidder);
+    }
+
+    /**
+     * Extracts UID from uids from body or {@link UidsCookie}.
+     */
+    private String extractUid(Map<String, String> uidsBody, UidsCookie uidsCookie, String bidder) {
+        final String uid = uidsBody.get(bidder);
+        return StringUtils.isNotBlank(uid) ? uid : uidsCookie.uidFrom(resolveCookieFamilyName(bidder));
+    }
+
+    /**
+     * Extract cookie family name from bidder's {@link Usersyncer} if it is enabled. If not - return null.
+     */
+    private String resolveCookieFamilyName(String bidder) {
+        return bidderCatalog.isActive(bidder) ? bidderCatalog.usersyncerByName(bidder).getCookieFamilyName() : null;
+    }
+
+    /**
+     * Returns shuffled list of {@link BidderRequest}.
+     */
+    private List<BidderRequest> getBidderRequests(
+            Map<String, PrivacyEnforcementResult> bidderToPrivacyEnforcementResult, BidRequest bidRequest,
+            ExtBidRequest requestExt, List<Imp> imps, List<String> firstPartyDataBidders) {
+
+        final Map<String, JsonNode> bidderToPrebidBidders = bidderToPrebidBidders(requestExt);
+        final Map<String, ObjectNode> bidderToPrebidSchains = bidderToPrebidSchains(requestExt);
+        final List<BidderRequest> bidderRequests = bidderToPrivacyEnforcementResult.entrySet().stream()
+                // for each bidder create a new request that is a copy of original request except buyerid, imp
+                // extensions, ext.prebid.data.bidders and ext.prebid.bidders.
+                // Also, check whether to pass user.ext.data, app.ext.data and site.ext.data or not.
+                .map(entry -> createBidderRequest(entry.getKey(), bidRequest, requestExt, imps, entry.getValue(),
+                        firstPartyDataBidders, bidderToPrebidBidders, bidderToPrebidSchains))
+                .collect(Collectors.toList());
+
+        Collections.shuffle(bidderRequests);
+
+        return bidderRequests;
+    }
+
+    /**
+     * Extracts a map of bidders to their arguments from {@link ObjectNode} prebid.bidders.
+     */
+    private static Map<String, JsonNode> bidderToPrebidBidders(ExtBidRequest requestExt) {
+        final ExtRequestPrebid prebid = requestExt == null ? null : requestExt.getPrebid();
+        final ObjectNode bidders = prebid == null ? null : prebid.getBidders();
+
+        if (bidders == null || bidders.isNull()) {
+            return Collections.emptyMap();
         }
+
+        final Map<String, JsonNode> bidderToPrebidParameters = new HashMap<>();
+        final Iterator<Map.Entry<String, JsonNode>> biddersToParams = bidders.fields();
+        while (biddersToParams.hasNext()) {
+            final Map.Entry<String, JsonNode> bidderToParam = biddersToParams.next();
+            bidderToPrebidParameters.put(bidderToParam.getKey(), bidderToParam.getValue());
+        }
+        return bidderToPrebidParameters;
+    }
+
+    /**
+     * Extracts a map of bidders to their arguments from {@link ObjectNode} prebid.schains.
+     */
+    private static Map<String, ObjectNode> bidderToPrebidSchains(ExtBidRequest requestExt) {
+        final ExtRequestPrebid prebid = requestExt == null ? null : requestExt.getPrebid();
+        final List<ExtRequestPrebidSchain> schains = prebid == null ? null : prebid.getSchains();
+
+        if (CollectionUtils.isEmpty(schains)) {
+            return Collections.emptyMap();
+        }
+
+        final Map<String, ObjectNode> bidderToPrebidSchains = new HashMap<>();
+        for (ExtRequestPrebidSchain schain : schains) {
+            final List<String> schainBidders = schain.getBidders();
+            if (CollectionUtils.isNotEmpty(schainBidders)) {
+                schainBidders.forEach(bidder -> bidderToPrebidSchains.put(bidder, schain.getSchain()));
+            }
+        }
+        return bidderToPrebidSchains;
+    }
+
+    /**
+     * Returns {@link BidderRequest} for the given bidder.
+     */
+    private BidderRequest createBidderRequest(String bidder, BidRequest bidRequest, ExtBidRequest requestExt,
+                                              List<Imp> imps, PrivacyEnforcementResult privacyEnforcementResult,
+                                              List<String> firstPartyDataBidders,
+                                              Map<String, JsonNode> bidderToPrebidBidders,
+                                              Map<String, ObjectNode> bidderToPrebidSchains) {
+        final App app = bidRequest.getApp();
+        final Site site = bidRequest.getSite();
+
+        return BidderRequest.of(bidder, bidRequest.toBuilder()
+                .user(privacyEnforcementResult.getUser())
+                .device(privacyEnforcementResult.getDevice())
+                .imp(prepareImps(bidder, imps, firstPartyDataBidders.contains(bidder)))
+                .app(prepareApp(app, extApp(app), firstPartyDataBidders.contains(bidder)))
+                .site(prepareSite(site, extSite(site), firstPartyDataBidders.contains(bidder)))
+                .source(prepareSource(bidder, bidderToPrebidSchains, bidRequest.getSource()))
+                .ext(prepareExt(bidder, firstPartyDataBidders, bidderToPrebidBidders, requestExt, bidRequest.getExt()))
+                .build());
+    }
+
+    /**
+     * Extracts {@link ExtApp} from {@link App}.
+     */
+    private ExtApp extApp(App app) {
+        final ObjectNode appExt = app == null ? null : app.getExt();
+        if (appExt != null) {
+            try {
+                return mapper.mapper().treeToValue(appExt, ExtApp.class);
+            } catch (JsonProcessingException e) {
+                throw new PreBidException(String.format("Error decoding bidRequest.app.ext: %s", e.getMessage()), e);
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Extracts {@link ExtSite} from {@link Site}.
+     */
+    private ExtSite extSite(Site site) {
+        final ObjectNode siteExt = site == null ? null : site.getExt();
+        if (siteExt != null) {
+            try {
+                return mapper.mapper().treeToValue(siteExt, ExtSite.class);
+            } catch (JsonProcessingException e) {
+                throw new PreBidException(String.format("Error decoding bidRequest.site.ext: %s", e.getMessage()), e);
+            }
+        }
+        return null;
+    }
+
+    /**
+     * For each given imp creates a new imp with extension crafted to contain only "prebid", "context" and
+     * bidder-specific extension.
+     */
+    private List<Imp> prepareImps(String bidder, List<Imp> imps, boolean useFirstPartyData) {
+        return imps.stream()
+                .filter(imp -> imp.getExt().hasNonNull(bidder))
+                .map(imp -> imp.toBuilder()
+                        .ext(prepareImpExt(bidder, imp.getExt(), useFirstPartyData))
+                        .build())
+                .collect(Collectors.toList());
     }
 
     /**
      * Creates a new imp extension for particular bidder having:
      * <ul>
-     * <li>"bidder" field populated with an imp.ext.{bidder} field value, not null</li>
      * <li>"prebid" field populated with an imp.ext.prebid field value, may be null</li>
+     * <li>"context" field populated with an imp.ext.context field value, may be null</li>
+     * <li>"bidder" field populated with an imp.ext.{bidder} field value, not null</li>
      * </ul>
      */
-    private static ExtPrebid<JsonNode, JsonNode> extractBidderExt(String bidder, ObjectNode impExt) {
-        return ExtPrebid.of(impExt.get(PREBID_EXT), impExt.get(bidder));
+    private ObjectNode prepareImpExt(String bidder, ObjectNode impExt, boolean useFirstPartyData) {
+        final ObjectNode result = mapper.mapper().valueToTree(ExtPrebid.of(impExt.get(PREBID_EXT), impExt.get(bidder)));
+
+        if (useFirstPartyData) {
+            result.set(CONTEXT_EXT, impExt.get(CONTEXT_EXT));
+        }
+
+        return result;
+    }
+
+    /**
+     * Checks whether to pass the app.ext.data depending on request having a first party data
+     * allowed for given bidder or not.
+     */
+    private App prepareApp(App app, ExtApp extApp, boolean useFirstPartyData) {
+        final ObjectNode extSiteDataNode = extApp == null ? null : extApp.getData();
+
+        return app != null && extSiteDataNode != null && !useFirstPartyData
+                ? app.toBuilder().ext(mapper.mapper().valueToTree(ExtApp.of(extApp.getPrebid(), null))).build()
+                : app;
+    }
+
+    /**
+     * Checks whether to pass the site.ext.data depending on request having a first party data
+     * allowed for given bidder or not.
+     */
+    private Site prepareSite(Site site, ExtSite extSite, boolean useFirstPartyData) {
+        final ObjectNode extSiteDataNode = extSite == null ? null : extSite.getData();
+
+        return site != null && extSiteDataNode != null && !useFirstPartyData
+                ? site.toBuilder().ext(mapper.mapper().valueToTree(ExtSite.of(extSite.getAmp(), null))).build()
+                : site;
+    }
+
+    /**
+     * Returns {@link Source} with corresponding request.ext.prebid.schains.
+     */
+    private Source prepareSource(String bidder, Map<String, ObjectNode> bidderToSchain, Source receivedSource) {
+        final ObjectNode defaultSchain = bidderToSchain.get(GENERIC_SCHAIN_KEY);
+        final ObjectNode bidderSchain = bidderToSchain.getOrDefault(bidder, defaultSchain);
+
+        if (bidderSchain == null || bidderSchain.isNull()) {
+            return receivedSource;
+        }
+
+        final ObjectNode extSourceNode = mapper.mapper().valueToTree(ExtSource.of(bidderSchain));
+
+        return receivedSource == null
+                ? Source.builder().ext(extSourceNode).build()
+                : receivedSource.toBuilder().ext(extSourceNode).build();
+    }
+
+    /**
+     * Removes all bidders except the given bidder from bidrequest.ext.prebid.data.bidders and
+     * bidrequest.ext.prebid.bidders to hide list of allowed bidders from initial request.
+     * Also masks bidrequest.ext.prebid.schains.
+     */
+    private ObjectNode prepareExt(String bidder, List<String> firstPartyDataBidders,
+                                  Map<String, JsonNode> bidderToPrebidBidders, ExtBidRequest requestExt,
+                                  ObjectNode requestExtNode) {
+        final ExtRequestPrebid extPrebid = requestExt != null ? requestExt.getPrebid() : null;
+        final List<ExtRequestPrebidSchain> extPrebidSchains = extPrebid != null ? extPrebid.getSchains() : null;
+        final boolean suppressSchains = extPrebidSchains != null;
+
+        if (firstPartyDataBidders.isEmpty() && bidderToPrebidBidders.isEmpty() && !suppressSchains) {
+            return requestExtNode;
+        }
+
+        final ExtRequestPrebidData prebidData = firstPartyDataBidders.contains(bidder)
+                ? ExtRequestPrebidData.of(Collections.singletonList(bidder))
+                : null;
+
+        final JsonNode prebidParameters = bidderToPrebidBidders.get(bidder);
+        final ObjectNode bidders = prebidParameters != null
+                ? mapper.mapper().valueToTree(ExtPrebidBidders.of(prebidParameters))
+                : null;
+
+        final ExtRequestPrebid.ExtRequestPrebidBuilder extPrebidBuilder = extPrebid != null
+                ? extPrebid.toBuilder()
+                : ExtRequestPrebid.builder();
+
+        return mapper.mapper().valueToTree(ExtBidRequest.of(extPrebidBuilder
+                .data(prebidData)
+                .bidders(bidders)
+                .schains(null)
+                .build()));
+    }
+
+    /**
+     * Updates 'account.*.request', 'request' and 'no_cookie_requests' metrics for each {@link BidderRequest}.
+     */
+    private List<BidderRequest> updateRequestMetric(List<BidderRequest> bidderRequests, UidsCookie uidsCookie,
+                                                    Map<String, String> aliases, String publisherId,
+                                                    MetricName requestTypeMetric) {
+        metrics.updateAccountRequestMetrics(publisherId, requestTypeMetric);
+
+        for (BidderRequest bidderRequest : bidderRequests) {
+            final String bidder = resolveBidder(bidderRequest.getBidder(), aliases);
+            final boolean isApp = bidderRequest.getBidRequest().getApp() != null;
+            final boolean noBuyerId = !bidderCatalog.isActive(bidder) || StringUtils.isBlank(
+                    uidsCookie.uidFrom(bidderCatalog.usersyncerByName(bidder).getCookieFamilyName()));
+
+            metrics.updateAdapterRequestTypeAndNoCookieMetrics(bidder, requestTypeMetric, !isApp && noBuyerId);
+        }
+        return bidderRequests;
+    }
+
+    /**
+     * Extracts bidAdjustments from {@link ExtBidRequest}.
+     */
+    private static Map<String, BigDecimal> bidAdjustments(ExtBidRequest requestExt) {
+        final ExtRequestPrebid prebid = requestExt != null ? requestExt.getPrebid() : null;
+        final Map<String, BigDecimal> bidAdjustmentFactors = prebid != null ? prebid.getBidadjustmentfactors() : null;
+        return bidAdjustmentFactors != null ? bidAdjustmentFactors : Collections.emptyMap();
     }
 
     /**
      * Passes the request to a corresponding bidder and wraps response in {@link BidderResponse} which also holds
      * recorded response time.
      */
-    private Future<BidderResponse> requestBids(BidderRequest bidderRequest, long startTime, Timeout timeout,
-                                               Map<String, String> aliases, Map<String, BigDecimal> bidAdjustments,
+    private Future<BidderResponse> requestBids(BidderRequest bidderRequest, Timeout timeout,
+                                               boolean debugEnabled, Map<String, String> aliases,
+                                               Map<String, BigDecimal> bidAdjustments,
                                                Map<String, Map<String, BigDecimal>> currencyConversionRates) {
-        final String bidder = bidderRequest.getBidder();
-        final BigDecimal bidPriceAdjustmentFactor = bidAdjustments.get(bidder);
-        final String adServerCurrency = bidderRequest.getBidRequest().getCur().get(0);
-        return bidderCatalog.bidderRequesterByName(resolveBidder(bidder, aliases))
-                .requestBids(bidderRequest.getBidRequest(), timeout)
-                .map(bidderSeatBid -> validateAndUpdateResponse(bidderSeatBid, bidderRequest.getBidRequest().getCur()))
+        final String bidderName = bidderRequest.getBidder();
+        final BigDecimal bidPriceAdjustmentFactor = bidAdjustments.get(bidderName);
+        final List<String> cur = bidderRequest.getBidRequest().getCur();
+        final String adServerCurrency = cur.get(0);
+        final Bidder<?> bidder = bidderCatalog.bidderByName(resolveBidder(bidderName, aliases));
+        final long startTime = clock.millis();
+
+        return httpBidderRequester.requestBids(bidder, bidderRequest.getBidRequest(), timeout, debugEnabled)
+                .map(bidderSeatBid -> validBidderSeatBid(bidderSeatBid, cur))
                 .map(seat -> applyBidPriceChanges(seat, currencyConversionRates, adServerCurrency,
                         bidPriceAdjustmentFactor))
-                .map(result -> BidderResponse.of(bidder, result, responseTime(startTime)));
+                .map(result -> BidderResponse.of(bidderName, result, responseTime(startTime)));
     }
 
     /**
@@ -678,52 +795,18 @@ public class ExchangeService {
      * <p>
      * Returns input argument as the result if no errors found or create new {@link BidderSeatBid} otherwise.
      */
-    private BidderSeatBid validateAndUpdateResponse(BidderSeatBid bidderSeatBid, List<String> requestCurrencies) {
-        final List<String> effectiveRequestCurrencies = requestCurrencies.isEmpty()
-                ? Collections.singletonList(DEFAULT_CURRENCY) : requestCurrencies;
-
+    private BidderSeatBid validBidderSeatBid(BidderSeatBid bidderSeatBid, List<String> requestCurrencies) {
         final List<BidderBid> bids = bidderSeatBid.getBids();
 
         final List<BidderBid> validBids = new ArrayList<>(bids.size());
         final List<BidderError> errors = new ArrayList<>(bidderSeatBid.getErrors());
 
-        if (isValidCurFromResponse(effectiveRequestCurrencies, bids, errors)) {
-            validateResponseBids(bids, validBids, errors);
+        if (requestCurrencies.size() > 1) {
+            errors.add(BidderError.badInput(
+                    String.format("Cur parameter contains more than one currency. %s will be used",
+                            requestCurrencies.get(0))));
         }
 
-        return validBids.size() == bids.size()
-                ? bidderSeatBid
-                : BidderSeatBid.of(validBids, bidderSeatBid.getHttpCalls(), errors);
-    }
-
-    private boolean isValidCurFromResponse(List<String> requestCurrencies, List<BidderBid> bids,
-                                           List<BidderError> errors) {
-        if (bids.size() > 0) {
-            //assume that currencies are the same among all bids
-            final List<String> bidderCurrencies = bids.stream()
-                    .map(bid -> ObjectUtils.firstNonNull(bid.getBidCurrency(), DEFAULT_CURRENCY))
-                    .distinct()
-                    .collect(Collectors.toList());
-
-            if (bidderCurrencies.size() > 1) {
-                errors.add(BidderError.generic("Bid currencies mismatch found. "
-                        + "Expected all bids to have the same currencies."));
-                return false;
-            }
-
-            final String bidderCurrency = bidderCurrencies.get(0);
-            if (!requestCurrencies.contains(bidderCurrency)) {
-                errors.add(BidderError.generic(String.format(
-                        "Bid currency is not allowed. Was %s, wants: [%s]",
-                        String.join(",", requestCurrencies), bidderCurrency)));
-                return false;
-            }
-        }
-
-        return true;
-    }
-
-    private void validateResponseBids(List<BidderBid> bids, List<BidderBid> validBids, List<BidderError> errors) {
         for (BidderBid bid : bids) {
             final ValidationResult validationResult = responseBidValidator.validate(bid.getBid());
             if (validationResult.hasErrors()) {
@@ -734,14 +817,16 @@ public class ExchangeService {
                 validBids.add(bid);
             }
         }
+
+        return errors.isEmpty() ? bidderSeatBid : BidderSeatBid.of(validBids, bidderSeatBid.getHttpCalls(), errors);
     }
 
     /**
      * Performs changes on {@link Bid}s price depends on different between adServerCurrency and bidCurrency,
      * and adjustment factor. Will drop bid if currency conversion is needed but not possible.
      * <p>
-     * This method should always be invoked after {@link ExchangeService#validateAndUpdateResponse(BidderSeatBid, List)}
-     * to make sure {@link Bid#price} is not empty.
+     * This method should always be invoked after {@link ExchangeService#validBidderSeatBid(BidderSeatBid, List)}
+     * to make sure {@link Bid#getPrice()} is not empty.
      */
     private BidderSeatBid applyBidPriceChanges(BidderSeatBid bidderSeatBid,
                                                Map<String, Map<String, BigDecimal>> requestCurrencyRates,
@@ -759,20 +844,22 @@ public class ExchangeService {
             final String bidCurrency = bidderBid.getBidCurrency();
             final BigDecimal price = bid.getPrice();
             try {
-                final BigDecimal convertedPrice = currencyService.convertCurrency(price,
-                        requestCurrencyRates, adServerCurrency, bidCurrency);
+                final BigDecimal finalPrice =
+                        currencyService.convertCurrency(price, requestCurrencyRates, adServerCurrency, bidCurrency);
 
                 final BigDecimal adjustedPrice = priceAdjustmentFactor != null
                         && priceAdjustmentFactor.compareTo(BigDecimal.ONE) != 0
-                        ? convertedPrice.multiply(priceAdjustmentFactor)
-                        : convertedPrice;
+                        ? finalPrice.multiply(priceAdjustmentFactor)
+                        : finalPrice;
 
                 if (adjustedPrice.compareTo(price) != 0) {
                     bid.setPrice(adjustedPrice);
                 }
                 updatedBidderBids.add(bidderBid);
             } catch (PreBidException ex) {
-                errors.add(BidderError.generic(ex.getMessage()));
+                errors.add(BidderError.generic(
+                        String.format("Unable to covert bid currency %s to desired ad server currency %s. %s",
+                                bidCurrency, adServerCurrency, ex.getMessage())));
             }
         }
 
@@ -798,10 +885,10 @@ public class ExchangeService {
 
     /**
      * Updates 'request_time', 'responseTime', 'timeout_request', 'error_requests', 'no_bid_requests',
-     * 'prices' metrics for each {@link BidderResponse}
+     * 'prices' metrics for each {@link BidderResponse}.
      * <p>
-     * This method should always be invoked after {@link ExchangeService#validateAndUpdateResponse(BidderSeatBid, List)}
-     * to make sure {@link Bid#price} is not empty.
+     * This method should always be invoked after {@link ExchangeService#validBidderSeatBid(BidderSeatBid, List)}
+     * to make sure {@link Bid#getPrice()} is not empty.
      */
     private List<BidderResponse> updateMetricsFromResponses(List<BidderResponse> bidderResponses, String publisherId) {
         for (final BidderResponse bidderResponse : bidderResponses) {
@@ -837,6 +924,9 @@ public class ExchangeService {
         return bidderResponses;
     }
 
+    /**
+     * Resolves {@link MetricName} by {@link BidderError.Type} value.
+     */
     private static MetricName bidderErrorTypeToMetric(BidderError.Type errorType) {
         final MetricName errorMetric;
         switch (errorType) {
@@ -857,370 +947,5 @@ public class ExchangeService {
                 errorMetric = MetricName.unknown_error;
         }
         return errorMetric;
-    }
-
-    /**
-     * Takes all the bids supplied by the bidder and crafts an OpenRTB {@link BidResponse} to send back to the
-     * requester.
-     */
-    private Future<BidResponse> toBidResponse(List<BidderResponse> bidderResponses, BidRequest bidRequest,
-                                              TargetingKeywordsCreator keywordsCreator, BidRequestCacheInfo cacheInfo,
-                                              String publisherId, Timeout timeout) {
-        final Set<Bid> bids = newOrEmptyOrderedSet(keywordsCreator);
-        final Set<Bid> winningBids = newOrEmptySet(keywordsCreator);
-        final Set<Bid> winningBidsByBidder = newOrEmptySet(keywordsCreator);
-        populateWinningBids(keywordsCreator, bidderResponses, bids, winningBids, winningBidsByBidder);
-
-        return toBidsWithCacheIds(bids, bidRequest.getImp(), keywordsCreator, cacheInfo, publisherId,
-                timeout)
-                .map(cacheResult -> toBidResponseWithCacheInfo(bidderResponses, bidRequest, keywordsCreator,
-                        cacheResult, winningBids, winningBidsByBidder, cacheInfo));
-    }
-
-    /**
-     * Returns new {@link HashSet} in case of existing keywordsCreator or {@link Collections.EmptySet} if null.
-     */
-    private static Set<Bid> newOrEmptySet(TargetingKeywordsCreator keywordsCreator) {
-        return keywordsCreator != null ? new HashSet<>() : Collections.emptySet();
-    }
-
-    private static Set<Bid> newOrEmptyOrderedSet(TargetingKeywordsCreator keywordsCreator) {
-        return keywordsCreator != null ? new LinkedHashSet<>() : Collections.emptySet();
-    }
-
-    /**
-     * Populates 2 input sets:
-     * <p>
-     * - winning bids for each impId (ad unit code) through all bidder responses.
-     * <br>
-     * - winning bids for each impId but for separate bidder.
-     * <p>
-     * Winning bid is the one with the highest price.
-     */
-    private static void populateWinningBids(TargetingKeywordsCreator keywordsCreator,
-                                            List<BidderResponse> bidderResponses, Set<Bid> bids,
-                                            Set<Bid> winningBids, Set<Bid> winningBidsByBidder) {
-        // determine winning bids only if targeting keywords are requested
-        if (keywordsCreator != null) {
-            final Map<String, Bid> winningBidsMap = new HashMap<>(); // impId -> Bid
-            final Map<String, Map<String, Bid>> winningBidsByBidderMap = new HashMap<>(); // impId -> [bidder -> Bid]
-
-            for (BidderResponse bidderResponse : bidderResponses) {
-                final String bidder = bidderResponse.getBidder();
-
-                for (BidderBid bidderBid : bidderResponse.getSeatBid().getBids()) {
-                    final Bid bid = bidderBid.getBid();
-
-                    bids.add(bid);
-                    tryAddWinningBid(bid, winningBidsMap);
-                    tryAddWinningBidByBidder(bid, bidder, winningBidsByBidderMap);
-                }
-            }
-
-            winningBids.addAll(winningBidsMap.values());
-
-            final List<Bid> bidsByBidder = winningBidsByBidderMap.values().stream()
-                    .flatMap(bidsByBidderMap -> bidsByBidderMap.values().stream())
-                    .collect(Collectors.toList());
-            winningBidsByBidder.addAll(bidsByBidder);
-        }
-    }
-
-    /**
-     * Tries to add a winning bid for each impId.
-     */
-    private static void tryAddWinningBid(Bid bid, Map<String, Bid> winningBids) {
-        final String impId = bid.getImpid();
-
-        if (!winningBids.containsKey(impId) || bid.getPrice().compareTo(winningBids.get(impId).getPrice()) > 0) {
-            winningBids.put(impId, bid);
-        }
-    }
-
-    /**
-     * Tries to add a winning bid for each impId for separate bidder.
-     */
-    private static void tryAddWinningBidByBidder(Bid bid, String bidder,
-                                                 Map<String, Map<String, Bid>> winningBidsByBidder) {
-        final String impId = bid.getImpid();
-
-        if (!winningBidsByBidder.containsKey(impId)) {
-            final Map<String, Bid> bidsByBidder = new HashMap<>();
-            bidsByBidder.put(bidder, bid);
-
-            winningBidsByBidder.put(impId, bidsByBidder);
-        } else {
-            final Map<String, Bid> bidsByBidder = winningBidsByBidder.get(impId);
-
-            if (!bidsByBidder.containsKey(bidder)
-                    || bid.getPrice().compareTo(bidsByBidder.get(bidder).getPrice()) > 0) {
-                bidsByBidder.put(bidder, bid);
-            }
-        }
-    }
-
-    /**
-     * Corresponds cacheId (or null if not present) to each {@link Bid}.
-     */
-    private Future<CacheResult> toBidsWithCacheIds(
-            Set<Bid> bids, List<Imp> imps, TargetingKeywordsCreator keywordsCreator,
-            BidRequestCacheInfo cacheInfo, String publisherId, Timeout timeout) {
-        final Future<CacheResult> result;
-        final List<String> errors = new ArrayList<>();
-
-        if (!cacheInfo.doCaching) {
-            result = Future.succeededFuture(CacheResult.of(toMapBidsWithEmptyCacheIds(bids), Collections.emptyList(),
-                    null));
-        } else {
-            long startTime = clock.millis();
-            // do not submit bids with zero CPM to prebid cache
-            final List<Bid> bidsWithNonZeroCpm = bids.stream()
-                    .filter(bid -> keywordsCreator.isNonZeroCpm(bid.getPrice()))
-                    .collect(Collectors.toList());
-
-            result = cacheService.cacheBidsOpenrtb(bidsWithNonZeroCpm, imps, CacheContext.of(
-                    cacheInfo.shouldCacheBids, cacheInfo.cacheBidsTtl, cacheInfo.shouldCacheVideoBids,
-                    cacheInfo.cacheVideoBidsTtl), publisherId, timeout)
-                    .recover(throwable -> processCacheServiceError(throwable, errors))
-                    .map(bidToCacheId -> addNotCachedBids(bidToCacheId, bids))
-                    .map(bidToCacheId -> CacheResult.of(bidToCacheId, errors, responseTime(startTime)));
-        }
-
-        return result;
-    }
-
-    private Future<Map<Bid, CacheIdInfo>> processCacheServiceError(Throwable throwable, List<String> errors) {
-        errors.add("Error occurred while trying to cache bids. Message : " + throwable.getMessage());
-
-        return Future.succeededFuture(Collections.emptyMap());
-    }
-
-    /**
-     * Adds bids with no cache id info.
-     */
-    private Map<Bid, CacheIdInfo> addNotCachedBids(Map<Bid, CacheIdInfo> bidToCacheIdInfo, Set<Bid> winningBids) {
-        if (winningBids.size() > bidToCacheIdInfo.size()) {
-            final Map<Bid, CacheIdInfo> result = new HashMap<>(bidToCacheIdInfo);
-            for (Bid bid : winningBids) {
-                if (!result.containsKey(bid)) {
-                    result.put(bid, CacheIdInfo.of(null, null));
-                }
-            }
-            return result;
-        }
-        return bidToCacheIdInfo;
-    }
-
-    /**
-     * Creates a map with {@link Bid} as a key and null as a value.
-     */
-    private static Map<Bid, CacheIdInfo> toMapBidsWithEmptyCacheIds(Set<Bid> bids) {
-        final Map<Bid, CacheIdInfo> result = new HashMap<>(bids.size());
-        bids.forEach(bid -> result.put(bid, CacheIdInfo.of(null, null)));
-
-        return result;
-    }
-
-    /**
-     * Creates an OpenRTB {@link BidResponse} from the bids supplied by the bidder,
-     * including processing of winning bids with cache IDs.
-     */
-    private BidResponse toBidResponseWithCacheInfo(List<BidderResponse> bidderResponses, BidRequest bidRequest,
-                                                   TargetingKeywordsCreator keywordsCreator,
-                                                   CacheResult cacheResult, Set<Bid> winningBids,
-                                                   Set<Bid> winningBidsByBidder, BidRequestCacheInfo cacheInfo) {
-        final List<SeatBid> seatBids = bidderResponses.stream()
-                .filter(bidderResponse -> !bidderResponse.getSeatBid().getBids().isEmpty())
-                .map(bidderResponse ->
-                        toSeatBid(bidderResponse, keywordsCreator, cacheResult, winningBids,
-                                winningBidsByBidder, cacheInfo))
-                .collect(Collectors.toList());
-
-        final ExtBidResponse bidResponseExt = toExtBidResponse(bidderResponses, bidRequest, cacheResult.getErrors(),
-                cacheResult.getExecutionTime());
-
-        return BidResponse.builder()
-                .id(bidRequest.getId())
-                .cur(bidRequest.getCur().get(0))
-                // signal "Invalid Request" if no valid bidders.
-                .nbr(bidderResponses.isEmpty() ? 2 : null)
-                .seatbid(seatBids)
-                .ext(Json.mapper.valueToTree(bidResponseExt))
-                .build();
-    }
-
-    /**
-     * Creates an OpenRTB {@link SeatBid} for a bidder. It will contain all the bids supplied by a bidder and a "bidder"
-     * extension field populated.
-     */
-    private SeatBid toSeatBid(BidderResponse bidderResponse, TargetingKeywordsCreator keywordsCreator,
-                              CacheResult cacheResult, Set<Bid> winningBid,
-                              Set<Bid> winningBidsByBidder, BidRequestCacheInfo cacheInfo) {
-        final String bidder = bidderResponse.getBidder();
-        final BidderSeatBid bidderSeatBid = bidderResponse.getSeatBid();
-
-        final SeatBid.SeatBidBuilder seatBidBuilder = SeatBid.builder()
-                .seat(bidder)
-                // prebid cannot support roadblocking
-                .group(0)
-                .bid(bidderSeatBid.getBids().stream()
-                        .map(bidderBid ->
-                                toBid(bidderBid, bidder, keywordsCreator, cacheResult.getCacheBids(), winningBid,
-                                        winningBidsByBidder, cacheInfo))
-                        .collect(Collectors.toList()));
-
-        return seatBidBuilder.build();
-    }
-
-    /**
-     * Returns an OpenRTB {@link Bid} with "prebid" and "bidder" extension fields populated.
-     */
-    private Bid toBid(BidderBid bidderBid, String bidder, TargetingKeywordsCreator keywordsCreator,
-                      Map<Bid, CacheIdInfo> bidsWithCacheIds, Set<Bid> winningBid,
-                      Set<Bid> winningBidsByBidder, BidRequestCacheInfo cacheInfo) {
-        final Bid bid = bidderBid.getBid();
-        final Map<String, String> targetingKeywords;
-        final ExtResponseCache cache;
-
-        if (keywordsCreator != null && winningBidsByBidder.contains(bid)) {
-            final boolean isWinningBid = winningBid.contains(bid);
-            final String cacheId = bidsWithCacheIds.get(bid).getCacheId();
-            final String videoCacheId = bidsWithCacheIds.get(bid).getVideoCacheId();
-
-            if ((videoCacheId != null && !cacheInfo.returnCreativeVideoBids)
-                    || (cacheId != null && !cacheInfo.returnCreativeBids)) {
-                bid.setAdm(null);
-            }
-
-            targetingKeywords = keywordsCreator.makeFor(bid, bidder, isWinningBid, cacheId, videoCacheId,
-                    cacheService.getEndpointHost(), cacheService.getEndpointPath(), cacheService.getEndpointHostPath());
-            final CacheAsset bids = cacheId != null ? toCacheAsset(cacheId) : null;
-            final CacheAsset vastXml = videoCacheId != null ? toCacheAsset(videoCacheId) : null;
-            cache = bids != null || vastXml != null ? ExtResponseCache.of(bids, vastXml) : null;
-        } else {
-            targetingKeywords = null;
-            cache = null;
-        }
-
-        final ExtBidPrebid prebidExt = ExtBidPrebid.of(bidderBid.getType(), targetingKeywords, cache);
-        final ExtPrebid<ExtBidPrebid, ObjectNode> bidExt = ExtPrebid.of(prebidExt, bid.getExt());
-
-        bid.setExt(Json.mapper.valueToTree(bidExt));
-
-        return bid;
-    }
-
-    /**
-     * Creates {@link CacheAsset} for the given cache ID.
-     */
-    private CacheAsset toCacheAsset(String cacheId) {
-        return CacheAsset.of(cacheService.getCachedAssetURL(cacheId), cacheId);
-    }
-
-    /**
-     * Creates {@link ExtBidResponse} populated with response time, errors and debug info (if requested) from all
-     * bidders
-     */
-    private ExtBidResponse toExtBidResponse(List<BidderResponse> results, BidRequest bidRequest,
-                                            List<String> cacheErrors, Integer cacheExecutionTime) {
-        final Map<String, List<ExtHttpCall>> httpCalls = Objects.equals(bidRequest.getTest(), 1)
-                ? results.stream().collect(
-                Collectors.toMap(BidderResponse::getBidder, r -> ListUtils.emptyIfNull(r.getSeatBid().getHttpCalls())))
-                : null;
-        final ExtResponseDebug extResponseDebug = httpCalls != null ? ExtResponseDebug.of(httpCalls, bidRequest) : null;
-
-        final Map<String, List<ExtBidderError>> errors = new HashMap<>();
-        for (BidderResponse bidderResponse : results) {
-            final List<BidderError> bidderErrors = bidderResponse.getSeatBid().getErrors();
-            if (CollectionUtils.isNotEmpty(bidderErrors)) {
-                errors.put(bidderResponse.getBidder(), errorsDetails(bidderErrors));
-            }
-        }
-
-        errors.putAll(extractDeprecatedBiddersErrors(bidRequest));
-        errors.putAll(extractCacheErrors(cacheErrors));
-
-        final Map<String, Integer> responseTimeMillis = results.stream()
-                .collect(Collectors.toMap(BidderResponse::getBidder, BidderResponse::getResponseTime));
-
-        if (cacheExecutionTime != null) {
-            responseTimeMillis.put(CACHE, cacheExecutionTime);
-        }
-
-        return ExtBidResponse.of(extResponseDebug, errors.isEmpty() ? null : errors,
-                responseTimeMillis, bidRequest.getTmax(), null);
-    }
-
-    private Map<String, List<ExtBidderError>> extractDeprecatedBiddersErrors(BidRequest bidRequest) {
-        return bidRequest.getImp().stream()
-                .filter(imp -> imp.getExt() != null)
-                .flatMap(imp -> asStream(imp.getExt().fieldNames()))
-                .distinct()
-                .filter(bidderCatalog::isDeprecatedName)
-                .collect(Collectors.toMap(Function.identity(),
-                        bidder -> Collections.singletonList(ExtBidderError.of(BidderError.Type.bad_input.getCode(),
-                                bidderCatalog.errorForDeprecatedName(bidder)))));
-    }
-
-    private Map<String, List<ExtBidderError>> extractCacheErrors(List<String> cacheErrors) {
-        List<ExtBidderError> extBidderErrors = cacheErrors.stream()
-                .map(error -> ExtBidderError.of(BidderError.Type.generic.getCode(), error))
-                .collect(Collectors.toList());
-
-        if (extBidderErrors.size() > 0) {
-            return Collections.singletonMap(PREBID_EXT, extBidderErrors);
-        }
-
-        return Collections.emptyMap();
-    }
-
-    private static List<ExtBidderError> errorsDetails(List<BidderError> errors) {
-        return CollectionUtils.emptyIfNull(errors).stream().map(bidderError -> ExtBidderError.of(
-                bidderError.getType().getCode(), bidderError.getMessage())).collect(Collectors.toList());
-    }
-
-    /**
-     * Holds caching information for auction request
-     */
-    @Builder
-    @Value
-    private static class BidRequestCacheInfo {
-
-        boolean doCaching;
-
-        boolean shouldCacheBids;
-
-        Integer cacheBidsTtl;
-
-        boolean shouldCacheVideoBids;
-
-        Integer cacheVideoBidsTtl;
-
-        boolean returnCreativeBids;
-
-        boolean returnCreativeVideoBids;
-
-        static BidRequestCacheInfo noCache() {
-            return BidRequestCacheInfo.builder()
-                    .doCaching(false)
-                    .shouldCacheBids(false)
-                    .cacheBidsTtl(null)
-                    .shouldCacheVideoBids(false)
-                    .cacheVideoBidsTtl(null)
-                    .returnCreativeBids(false)
-                    .returnCreativeVideoBids(false)
-                    .build();
-        }
-    }
-
-    @Value
-    @AllArgsConstructor(staticName = "of")
-    private static class CacheResult {
-
-        Map<Bid, CacheIdInfo> cacheBids;
-
-        List<String> errors;
-
-        Integer executionTime;
     }
 }

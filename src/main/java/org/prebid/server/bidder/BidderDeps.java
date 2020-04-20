@@ -1,14 +1,15 @@
 package org.prebid.server.bidder;
 
-import lombok.AllArgsConstructor;
+import lombok.Builder;
 import lombok.Value;
+import org.prebid.server.proto.response.BidderInfo;
 
 import java.util.List;
 
 /**
  * Gathers all dependencies for bidder.
  */
-@AllArgsConstructor(staticName = "of")
+@Builder
 @Value
 public class BidderDeps {
 
@@ -38,7 +39,7 @@ public class BidderDeps {
     /**
      * Bidder's meta information is used in {@link org.prebid.server.handler.info.BidderDetailsHandler} handler
      */
-    MetaInfo metaInfo;
+    BidderInfo bidderInfo;
 
     /**
      * Bidder's user syncer is used in {@link org.prebid.server.handler.CookieSyncHandler} handler and holds cookie
@@ -55,9 +56,4 @@ public class BidderDeps {
      * Bidder's adapter is used in legacy auction handling.
      */
     Adapter<?, ?> adapter;
-
-    /**
-     * Bidder's requester is used in OpenRTB 2.5 auction handling.
-     */
-    BidderRequester bidderRequester;
 }

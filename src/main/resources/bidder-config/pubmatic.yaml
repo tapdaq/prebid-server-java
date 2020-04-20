@@ -1,8 +1,23 @@
 adapters:
   pubmatic:
     enabled: false
-    endpoint: http://hbopenbid.pubmatic.com/translator?source=prebid-server
-    usersync-url: //ads.pubmatic.com/AdServer/js/user_sync.html?predirect=
+    endpoint: https://hbopenbid.pubmatic.com/translator?source=prebid-server
     pbs-enforces-gdpr: true
+    modifying-vast-xml-allowed: true
     deprecated-names:
     aliases:
+    meta-info:
+      maintainer-email: header-bidding@pubmatic.com
+      app-media-types:
+        - banner
+      site-media-types:
+        - banner
+        - video
+      supported-vendors:
+      vendor-id: 76
+    usersync:
+      url: https://ads.pubmatic.com/AdServer/js/user_sync.html?gdpr={{gdpr}}&gdpr_consent={{gdpr_consent}}&us_privacy={{us_privacy}}&predirect=
+      redirect-url: /setuid?bidder=pubmatic&gdpr={{gdpr}}&gdpr_consent={{gdpr_consent}}&us_privacy={{us_privacy}}&uid=
+      cookie-family-name: pubmatic
+      type: iframe
+      support-cors: false

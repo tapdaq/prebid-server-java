@@ -18,7 +18,6 @@ import io.netty.channel.ConnectTimeoutException;
 import io.vertx.core.Future;
 import io.vertx.core.MultiMap;
 import io.vertx.core.http.HttpMethod;
-import io.vertx.core.json.Json;
 import lombok.AllArgsConstructor;
 import lombok.Value;
 import org.junit.Before;
@@ -43,6 +42,7 @@ import org.prebid.server.cookie.UidsCookie;
 import org.prebid.server.exception.PreBidException;
 import org.prebid.server.execution.Timeout;
 import org.prebid.server.execution.TimeoutFactory;
+import org.prebid.server.privacy.PrivacyExtractor;
 import org.prebid.server.proto.openrtb.ext.request.ExtRegs;
 import org.prebid.server.proto.openrtb.ext.request.ExtUser;
 import org.prebid.server.proto.request.PreBidRequest;
@@ -66,7 +66,9 @@ import java.util.stream.Collectors;
 import static io.vertx.core.http.HttpMethod.GET;
 import static io.vertx.core.http.HttpMethod.POST;
 import static java.util.Arrays.asList;
-import static java.util.Collections.*;
+import static java.util.Collections.emptyList;
+import static java.util.Collections.singleton;
+import static java.util.Collections.singletonList;
 import static java.util.function.Function.identity;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
@@ -76,7 +78,9 @@ import static org.mockito.BDDMockito.given;
 import static org.mockito.BDDMockito.willReturn;
 import static org.mockito.Mockito.eq;
 import static org.mockito.Mockito.isNull;
-import static org.mockito.Mockito.*;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyZeroInteractions;
 
 public class HttpAdapterConnectorTest extends VertxTest {
 
@@ -87,10 +91,9 @@ public class HttpAdapterConnectorTest extends VertxTest {
     private Clock clock;
 
     private HttpAdapterConnector httpAdapterConnector;
-
     @Mock
     private Adapter<?, ?> adapter;
-    @Mock
+
     private Usersyncer usersyncer;
     @Mock
     private UidsCookie uidsCookie;
@@ -108,9 +111,10 @@ public class HttpAdapterConnectorTest extends VertxTest {
         adapterRequest = AdapterRequest.of(null, null);
         preBidRequestContext = givenPreBidRequestContext(identity(), identity());
 
-        httpAdapterConnector = new HttpAdapterConnector(httpClient, clock);
+        httpAdapterConnector = new HttpAdapterConnector(
+                httpClient, new PrivacyExtractor(jacksonMapper), clock, jacksonMapper);
 
-        given(usersyncer.usersyncInfo()).willReturn(UsersyncInfo.of("", null, null));
+        usersyncer = new Usersyncer(null, "", "", null, null, false);
     }
 
     @Test
@@ -406,8 +410,7 @@ public class HttpAdapterConnectorTest extends VertxTest {
     }
 
     @Test
-    public void
-    callShouldReturnAdapterResponseWithErrorIfAtLeastOneErrorOccursWhileHttpRequestForNotToleratedErrorsAdapter()
+    public void callShouldReturnAdapterResponseWithErrorIfErrorsOccurWhileHttpRequestForNotToleratedErrorsAdapter()
             throws JsonProcessingException {
         // given
         givenHttpClientReturnsResponse(200, null);
@@ -439,8 +442,7 @@ public class HttpAdapterConnectorTest extends VertxTest {
     }
 
     @Test
-    public void
-    callShouldReturnAdapterResponseWithoutErrorIfAtLeastOneBidIsPresentWhileHttpRequestForToleratedErrorsAdapter()
+    public void callShouldReturnAdapterResponseWithoutErrorIfBidsArePresentWhileHttpRequestForToleratedErrorsAdapter()
             throws JsonProcessingException {
         // given
         willReturn(asList(givenHttpRequest(), givenHttpRequest())).given(adapter).makeHttpRequests(any(), any());
@@ -471,8 +473,7 @@ public class HttpAdapterConnectorTest extends VertxTest {
     }
 
     @Test
-    public void
-    callShouldReturnAdapterResponseWithErrorIfAtLeastOneErrorOccursWhileExtractingForNotToleratedErrorsAdapter()
+    public void callShouldReturnAdapterResponseWithErrorIfErrorsOccurWhileExtractingForNotToleratedErrorsAdapter()
             throws JsonProcessingException {
         // given
         willReturn(asList(givenHttpRequest(), givenHttpRequest())).given(adapter).makeHttpRequests(any(), any());
@@ -499,8 +500,7 @@ public class HttpAdapterConnectorTest extends VertxTest {
     }
 
     @Test
-    public void
-    callShouldReturnAdapterResponseWithoutErrorIfAtLeastOneBidIsPresentWhileExtractingForToleratedErrorsAdapter()
+    public void callShouldReturnAdapterResponseWithoutErrorIfBidsArePresentWhileExtractingForToleratedErrorsAdapter()
             throws JsonProcessingException {
         // given
         willReturn(asList(givenHttpRequest(), givenHttpRequest())).given(adapter).makeHttpRequests(any(), any());
@@ -563,8 +563,7 @@ public class HttpAdapterConnectorTest extends VertxTest {
         // given
         givenHttpClientReturnsResponse(200,
                 givenBidResponse(identity(), identity(), singletonList(identity())));
-
-        given(usersyncer.usersyncInfo()).willReturn(UsersyncInfo.of("url1", null, false));
+        usersyncer = new Usersyncer(null, "url1", null, null, null, false);
 
         // when
         final Future<AdapterResponse> adapterResponseFuture =
@@ -581,18 +580,19 @@ public class HttpAdapterConnectorTest extends VertxTest {
     public void callShouldReturnGdprAwareAdapterResponseWithNoCookieIfNoAdapterUidInCookieAndNoAppInPreBidRequest()
             throws IOException {
         // given
-        final Regs regs = Regs.of(0, Json.mapper.valueToTree(ExtRegs.of(1)));
+        final Regs regs = Regs.of(0, mapper.valueToTree(ExtRegs.of(1, "1--")));
         final User user = User.builder()
-                .ext(Json.mapper.valueToTree(ExtUser.of(null, "consent$1", null)))
+                .ext(mapper.valueToTree(ExtUser.builder().consent("consent$1").build()))
                 .build();
         preBidRequestContext = givenPreBidRequestContext(identity(), builder -> builder.regs(regs).user(user));
 
         givenHttpClientReturnsResponse(200,
                 givenBidResponse(identity(), identity(), singletonList(identity())));
 
-        given(usersyncer.usersyncInfo()).willReturn(
-                UsersyncInfo.of("http://url?redir=%26gdpr%3D{{gdpr}}%26gdpr_consent%3D{{gdpr_consent}}",
-                        null, false));
+        usersyncer = new Usersyncer(null, "http://url?redir=%26gdpr%3D{{gdpr}}"
+                + "%26gdpr_consent%3D{{gdpr_consent}}"
+                + "%26us_privacy={{us_privacy}}",
+                null, null, null, false);
 
         // when
         final Future<AdapterResponse> adapterResponseFuture =
@@ -602,8 +602,8 @@ public class HttpAdapterConnectorTest extends VertxTest {
         final AdapterResponse adapterResponse = adapterResponseFuture.result();
         assertThat(adapterResponse.getBidderStatus().getNoCookie()).isTrue();
         assertThat(adapterResponse.getBidderStatus().getUsersync()).isNotNull();
-        assertThat(adapterResponse.getBidderStatus().getUsersync())
-                .isEqualTo(UsersyncInfo.of("http://url?redir=%26gdpr%3D1%26gdpr_consent%3Dconsent%241", null, false));
+        assertThat(adapterResponse.getBidderStatus().getUsersync()).isEqualTo(UsersyncInfo.of(
+                "http://url?redir=%26gdpr%3D1%26gdpr_consent%3Dconsent%241%26us_privacy=1--", null, false));
     }
 
     @Test

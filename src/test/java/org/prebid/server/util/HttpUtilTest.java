@@ -1,13 +1,30 @@
 package org.prebid.server.util;
 
 import io.vertx.core.MultiMap;
+import io.vertx.core.http.Cookie;
+import io.vertx.ext.web.RoutingContext;
+import org.junit.Rule;
 import org.junit.Test;
+import org.mockito.Mock;
+import org.mockito.junit.MockitoJUnit;
+import org.mockito.junit.MockitoRule;
 
 import java.util.Map;
 
-import static org.assertj.core.api.Assertions.*;
+import static java.util.Collections.singletonMap;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
+import static org.assertj.core.api.Assertions.entry;
+import static org.assertj.core.api.Assertions.tuple;
+import static org.mockito.BDDMockito.given;
 
 public class HttpUtilTest {
+
+    @Rule
+    public final MockitoRule mockitoRule = MockitoJUnit.rule();
+
+    @Mock
+    private RoutingContext routingContext;
 
     @Test
     public void isSafariShouldReturnTrue() {
@@ -41,7 +58,7 @@ public class HttpUtilTest {
     @Test
     public void encodeUrlShouldReturnExpectedValue() {
         // when
-        final String url = HttpUtil.encodeUrl("//domain.org/%s", "query-string?a=1");
+        final String url = HttpUtil.encodeUrl("//domain.org/query-string?a=1");
 
         // then
         assertThat(url).isNotNull();
@@ -71,7 +88,7 @@ public class HttpUtilTest {
         HttpUtil.addHeaderIfValueIsNotEmpty(headers, "header", "");
 
         // then
-        assertThat(headers).hasSize(0);
+        assertThat(headers).isEmpty();
     }
 
     @Test
@@ -83,7 +100,7 @@ public class HttpUtilTest {
         HttpUtil.addHeaderIfValueIsNotEmpty(headers, "header", null);
 
         // then
-        assertThat(headers).hasSize(0);
+        assertThat(headers).isEmpty();
     }
 
     @Test
@@ -102,5 +119,32 @@ public class HttpUtilTest {
 
         // then
         assertThat(domain).isNull();
+    }
+
+    @Test
+    public void cookiesAsMapShouldReturnExpectedResult() {
+        // given
+        given(routingContext.cookieMap()).willReturn(singletonMap("name", Cookie.cookie("name", "value")));
+
+        // when
+        final Map<String, String> cookies = HttpUtil.cookiesAsMap(routingContext);
+
+        // then
+        assertThat(cookies).hasSize(1)
+                .containsOnly(entry("name", "value"));
+    }
+
+    @Test
+    public void toSetCookieHeaderValueShouldReturnExpectedString() {
+        // given
+        final Cookie cookie = Cookie.cookie("cookie", "value")
+                .setPath("/")
+                .setDomain("rubicon.com");
+
+        // when
+        final String setCookieHeaderValue = HttpUtil.toSetCookieHeaderValue(cookie);
+
+        // then
+        assertThat(setCookieHeaderValue).isEqualTo("cookie=value; Path=/; Domain=rubicon.com; SameSite=None; Secure");
     }
 }

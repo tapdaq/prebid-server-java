@@ -7,22 +7,20 @@ import com.iab.openrtb.request.Imp;
 import com.iab.openrtb.request.User;
 import com.iab.openrtb.response.BidResponse;
 import io.vertx.core.MultiMap;
-import io.vertx.core.http.HttpHeaders;
+import io.vertx.core.http.Cookie;
 import io.vertx.core.http.HttpMethod;
-import io.vertx.core.json.Json;
-import io.vertx.ext.web.Cookie;
 import org.apache.commons.lang3.StringUtils;
 import org.prebid.server.auction.model.AdUnitBid;
 import org.prebid.server.auction.model.AdapterRequest;
 import org.prebid.server.auction.model.PreBidRequestContext;
 import org.prebid.server.bidder.Adapter;
 import org.prebid.server.bidder.OpenrtbAdapter;
-import org.prebid.server.bidder.Usersyncer;
 import org.prebid.server.bidder.model.AdUnitBidWithParams;
 import org.prebid.server.bidder.model.AdapterHttpRequest;
 import org.prebid.server.bidder.model.ExchangeCall;
 import org.prebid.server.bidder.sovrn.proto.SovrnParams;
 import org.prebid.server.exception.PreBidException;
+import org.prebid.server.json.JacksonMapper;
 import org.prebid.server.proto.request.PreBidRequest;
 import org.prebid.server.proto.response.Bid;
 import org.prebid.server.proto.response.MediaType;
@@ -42,10 +40,12 @@ public class SovrnAdapter extends OpenrtbAdapter {
     private static final String LJT_READER_COOKIE_NAME = "ljt_reader";
 
     private final String endpointUrl;
+    private final JacksonMapper mapper;
 
-    public SovrnAdapter(Usersyncer usersyncer, String endpointUrl) {
-        super(usersyncer);
+    public SovrnAdapter(String cookieFamilyName, String endpointUrl, JacksonMapper mapper) {
+        super(cookieFamilyName);
         this.endpointUrl = HttpUtil.validateUrl(Objects.requireNonNull(endpointUrl));
+        this.mapper = Objects.requireNonNull(mapper);
     }
 
     @Override
@@ -83,20 +83,20 @@ public class SovrnAdapter extends OpenrtbAdapter {
                 .build();
     }
 
-    private static List<AdUnitBidWithParams<SovrnParams>> createAdUnitBidsWithParams(List<AdUnitBid> adUnitBids) {
+    private List<AdUnitBidWithParams<SovrnParams>> createAdUnitBidsWithParams(List<AdUnitBid> adUnitBids) {
         return adUnitBids.stream()
                 .map(adUnitBid -> AdUnitBidWithParams.of(adUnitBid, parseAndValidateParams(adUnitBid)))
                 .collect(Collectors.toList());
     }
 
-    private static SovrnParams parseAndValidateParams(AdUnitBid adUnitBid) {
+    private SovrnParams parseAndValidateParams(AdUnitBid adUnitBid) {
         final ObjectNode paramsNode = adUnitBid.getParams();
         if (paramsNode == null) {
             throw new PreBidException("Sovrn params section is missing");
         }
 
         try {
-            return Json.mapper.convertValue(paramsNode, SovrnParams.class);
+            return mapper.mapper().convertValue(paramsNode, SovrnParams.class);
         } catch (IllegalArgumentException e) {
             throw new PreBidException(e.getMessage(), e.getCause());
         }
@@ -133,8 +133,9 @@ public class SovrnAdapter extends OpenrtbAdapter {
 
         final Device device = bidRequest.getDevice();
         if (device != null) {
-            HttpUtil.addHeaderIfValueIsNotEmpty(headers, HttpHeaders.USER_AGENT.toString(), device.getUa());
-            HttpUtil.addHeaderIfValueIsNotEmpty(headers, HttpHeaders.ACCEPT_LANGUAGE.toString(), device.getLanguage());
+            HttpUtil.addHeaderIfValueIsNotEmpty(headers, HttpUtil.USER_AGENT_HEADER.toString(), device.getUa());
+            HttpUtil.addHeaderIfValueIsNotEmpty(headers, HttpUtil.ACCEPT_LANGUAGE_HEADER.toString(),
+                    device.getLanguage());
             HttpUtil.addHeaderIfValueIsNotEmpty(headers, HttpUtil.X_FORWARDED_FOR_HEADER.toString(), device.getIp());
             HttpUtil.addHeaderIfValueIsNotEmpty(headers, HttpUtil.DNT_HEADER.toString(),
                     Objects.toString(device.getDnt(), null));
@@ -143,7 +144,7 @@ public class SovrnAdapter extends OpenrtbAdapter {
         final User user = bidRequest.getUser();
         final String buyeruid = user != null ? StringUtils.trimToNull(user.getBuyeruid()) : null;
         if (buyeruid != null) {
-            headers.add(HttpHeaders.COOKIE.toString(), Cookie.cookie(LJT_READER_COOKIE_NAME, buyeruid).encode());
+            headers.add(HttpUtil.COOKIE_HEADER.toString(), Cookie.cookie(LJT_READER_COOKIE_NAME, buyeruid).encode());
         }
         return headers;
     }

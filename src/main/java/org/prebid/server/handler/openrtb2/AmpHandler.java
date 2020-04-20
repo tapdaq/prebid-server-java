@@ -1,10 +1,12 @@
 package org.prebid.server.handler.openrtb2;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.databind.node.TextNode;
 import com.iab.openrtb.request.BidRequest;
+import com.iab.openrtb.request.Imp;
 import com.iab.openrtb.response.Bid;
 import com.iab.openrtb.response.BidResponse;
 import com.iab.openrtb.response.SeatBid;
@@ -12,8 +14,6 @@ import io.netty.handler.codec.http.HttpHeaderValues;
 import io.netty.handler.codec.http.HttpResponseStatus;
 import io.vertx.core.AsyncResult;
 import io.vertx.core.Handler;
-import io.vertx.core.http.HttpHeaders;
-import io.vertx.core.json.Json;
 import io.vertx.core.logging.Logger;
 import io.vertx.core.logging.LoggerFactory;
 import io.vertx.ext.web.RoutingContext;
@@ -22,22 +22,28 @@ import org.apache.commons.lang3.ObjectUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.prebid.server.analytics.AnalyticsReporter;
 import org.prebid.server.analytics.model.AmpEvent;
+import org.prebid.server.analytics.model.HttpContext;
 import org.prebid.server.auction.AmpRequestFactory;
 import org.prebid.server.auction.AmpResponsePostProcessor;
 import org.prebid.server.auction.ExchangeService;
+import org.prebid.server.auction.model.AuctionContext;
 import org.prebid.server.auction.model.Tuple2;
 import org.prebid.server.auction.model.Tuple3;
 import org.prebid.server.bidder.BidderCatalog;
 import org.prebid.server.cookie.UidsCookie;
-import org.prebid.server.cookie.UidsCookieService;
+import org.prebid.server.exception.BlacklistedAccountException;
+import org.prebid.server.exception.BlacklistedAppException;
 import org.prebid.server.exception.InvalidRequestException;
 import org.prebid.server.exception.PreBidException;
-import org.prebid.server.execution.Timeout;
-import org.prebid.server.execution.TimeoutFactory;
+import org.prebid.server.exception.UnauthorizedAccountException;
+import org.prebid.server.json.JacksonMapper;
+import org.prebid.server.log.ConditionalLogger;
+import org.prebid.server.manager.AdminManager;
 import org.prebid.server.metric.MetricName;
 import org.prebid.server.metric.Metrics;
-import org.prebid.server.metric.model.MetricsContext;
 import org.prebid.server.proto.openrtb.ext.ExtPrebid;
+import org.prebid.server.proto.openrtb.ext.request.ExtBidRequest;
+import org.prebid.server.proto.openrtb.ext.request.ExtRequestPrebid;
 import org.prebid.server.proto.openrtb.ext.response.ExtBidPrebid;
 import org.prebid.server.proto.openrtb.ext.response.ExtBidResponse;
 import org.prebid.server.proto.openrtb.ext.response.ExtBidderError;
@@ -58,6 +64,7 @@ import java.util.stream.Collectors;
 public class AmpHandler implements Handler<RoutingContext> {
 
     private static final Logger logger = LoggerFactory.getLogger(AmpHandler.class);
+    private static final ConditionalLogger conditionalLogger = new ConditionalLogger(logger);
 
     private static final TypeReference<ExtPrebid<ExtBidPrebid, ObjectNode>> EXT_PREBID_TYPE_REFERENCE =
             new TypeReference<ExtPrebid<ExtBidPrebid, ObjectNode>>() {
@@ -65,72 +72,76 @@ public class AmpHandler implements Handler<RoutingContext> {
     private static final TypeReference<ExtBidResponse> EXT_BID_RESPONSE_TYPE_REFERENCE =
             new TypeReference<ExtBidResponse>() {
             };
+    private static final MetricName REQUEST_TYPE_METRIC = MetricName.amp;
 
-    private static final MetricsContext METRICS_CONTEXT = MetricsContext.of(MetricName.amp);
-
-    private final long defaultTimeout;
     private final AmpRequestFactory ampRequestFactory;
     private final ExchangeService exchangeService;
-    private final UidsCookieService uidsCookieService;
-    private final Set<String> biddersSupportingCustomTargeting;
-    private final BidderCatalog bidderCatalog;
     private final AnalyticsReporter analyticsReporter;
-    private final AmpResponsePostProcessor ampResponsePostProcessor;
     private final Metrics metrics;
     private final Clock clock;
-    private final TimeoutFactory timeoutFactory;
+    private final BidderCatalog bidderCatalog;
+    private final Set<String> biddersSupportingCustomTargeting;
+    private final AmpResponsePostProcessor ampResponsePostProcessor;
+    private final AdminManager adminManager;
+    private final JacksonMapper mapper;
 
-    public AmpHandler(long defaultTimeout, AmpRequestFactory ampRequestFactory, ExchangeService exchangeService,
-                      UidsCookieService uidsCookieService, Set<String> biddersSupportingCustomTargeting,
-                      BidderCatalog bidderCatalog, AnalyticsReporter analyticsReporter,
-                      AmpResponsePostProcessor ampResponsePostProcessor, Metrics metrics, Clock clock,
-                      TimeoutFactory timeoutFactory) {
-        this.defaultTimeout = defaultTimeout;
+    public AmpHandler(AmpRequestFactory ampRequestFactory,
+                      ExchangeService exchangeService,
+                      AnalyticsReporter analyticsReporter,
+                      Metrics metrics,
+                      Clock clock,
+                      BidderCatalog bidderCatalog,
+                      Set<String> biddersSupportingCustomTargeting,
+                      AmpResponsePostProcessor ampResponsePostProcessor,
+                      AdminManager adminManager,
+                      JacksonMapper mapper) {
+
         this.ampRequestFactory = Objects.requireNonNull(ampRequestFactory);
         this.exchangeService = Objects.requireNonNull(exchangeService);
-        this.uidsCookieService = Objects.requireNonNull(uidsCookieService);
-        this.biddersSupportingCustomTargeting = Objects.requireNonNull(biddersSupportingCustomTargeting);
-        this.bidderCatalog = Objects.requireNonNull(bidderCatalog);
         this.analyticsReporter = Objects.requireNonNull(analyticsReporter);
-        this.ampResponsePostProcessor = Objects.requireNonNull(ampResponsePostProcessor);
         this.metrics = Objects.requireNonNull(metrics);
         this.clock = Objects.requireNonNull(clock);
-        this.timeoutFactory = Objects.requireNonNull(timeoutFactory);
+        this.bidderCatalog = Objects.requireNonNull(bidderCatalog);
+        this.biddersSupportingCustomTargeting = Objects.requireNonNull(biddersSupportingCustomTargeting);
+        this.ampResponsePostProcessor = Objects.requireNonNull(ampResponsePostProcessor);
+        this.adminManager = Objects.requireNonNull(adminManager);
+        this.mapper = Objects.requireNonNull(mapper);
     }
 
     @Override
-    public void handle(RoutingContext context) {
+    public void handle(RoutingContext routingContext) {
         // Prebid Server interprets request.tmax to be the maximum amount of time that a caller is willing to wait
         // for bids. However, tmax may be defined in the Stored Request data.
         // If so, then the trip to the backend might use a significant amount of this time. We can respect timeouts
         // more accurately if we note the real start time, and use it to compute the auction timeout.
         final long startTime = clock.millis();
 
-        final boolean isSafari = HttpUtil.isSafari(context.request().headers().get(HttpHeaders.USER_AGENT));
+        final boolean isSafari = HttpUtil.isSafari(routingContext.request().headers().get(HttpUtil.USER_AGENT_HEADER));
         metrics.updateSafariRequestsMetric(isSafari);
 
-        final UidsCookie uidsCookie = uidsCookieService.parseFromRequest(context);
-
         final AmpEvent.AmpEventBuilder ampEventBuilder = AmpEvent.builder()
-                .context(context)
-                .uidsCookie(uidsCookie);
+                .httpContext(HttpContext.from(routingContext));
 
-        ampRequestFactory.fromRequest(context)
-                .map(bidRequest -> addToEvent(bidRequest, ampEventBuilder::bidRequest, bidRequest))
-                .map(bidRequest -> updateAppAndNoCookieAndImpsRequestedMetrics(bidRequest, uidsCookie, isSafari))
-                .compose(bidRequest ->
-                        exchangeService.holdAuction(bidRequest, uidsCookie, timeout(bidRequest, startTime),
-                                METRICS_CONTEXT, context)
-                                .map(bidResponse -> Tuple2.of(bidRequest, bidResponse)))
-                .map((Tuple2<BidRequest, BidResponse> result) ->
-                        addToEvent(result.getRight(), ampEventBuilder::bidResponse, result))
-                .map((Tuple2<BidRequest, BidResponse> result) -> Tuple3.of(result.getLeft(), result.getRight(),
-                        toAmpResponse(result.getLeft(), result.getRight())))
-                .compose((Tuple3<BidRequest, BidResponse, AmpResponse> result) ->
-                        ampResponsePostProcessor.postProcess(result.getLeft(), result.getMiddle(), result.getRight(),
-                                context.queryParams()))
+        ampRequestFactory.fromRequest(routingContext, startTime)
+                .map(context -> context.toBuilder()
+                        .requestTypeMetric(REQUEST_TYPE_METRIC)
+                        .build())
+
+                .map(context -> addToEvent(context, ampEventBuilder::auctionContext, context))
+                .map(context -> updateAppAndNoCookieAndImpsMetrics(context, isSafari))
+
+                .compose(context -> exchangeService.holdAuction(context)
+                        .map(bidResponse -> Tuple2.of(bidResponse, context)))
+
+                .map(result -> addToEvent(result.getLeft(), ampEventBuilder::bidResponse, result))
+                .map(result -> Tuple3.of(result.getLeft(), result.getRight(),
+                        toAmpResponse(result.getRight().getBidRequest(), result.getLeft())))
+
+                .compose(result -> ampResponsePostProcessor.postProcess(result.getMiddle().getBidRequest(),
+                        result.getLeft(), result.getRight(), routingContext))
+
                 .map(ampResponse -> addToEvent(ampResponse.getTargeting(), ampEventBuilder::targeting, ampResponse))
-                .setHandler(responseResult -> handleResult(responseResult, ampEventBuilder, context, startTime));
+                .setHandler(responseResult -> handleResult(responseResult, ampEventBuilder, routingContext, startTime));
     }
 
     private static <T, R> R addToEvent(T field, Consumer<T> consumer, R result) {
@@ -138,20 +149,21 @@ public class AmpHandler implements Handler<RoutingContext> {
         return result;
     }
 
-    private BidRequest updateAppAndNoCookieAndImpsRequestedMetrics(BidRequest bidRequest, UidsCookie uidsCookie,
-                                                                   boolean isSafari) {
-        metrics.updateAppAndNoCookieAndImpsRequestedMetrics(bidRequest.getApp() != null, uidsCookie.hasLiveUids(),
-                isSafari, bidRequest.getImp().size());
-        return bidRequest;
-    }
+    private AuctionContext updateAppAndNoCookieAndImpsMetrics(AuctionContext context, boolean isSafari) {
+        final BidRequest bidRequest = context.getBidRequest();
+        final UidsCookie uidsCookie = context.getUidsCookie();
 
-    private Timeout timeout(BidRequest bidRequest, long startTime) {
-        final Long tmax = bidRequest.getTmax();
-        return timeoutFactory.create(startTime, tmax != null && tmax > 0 ? tmax : defaultTimeout);
+        final List<Imp> imps = bidRequest.getImp();
+        metrics.updateAppAndNoCookieAndImpsRequestedMetrics(bidRequest.getApp() != null, uidsCookie.hasLiveUids(),
+                isSafari, imps.size());
+
+        metrics.updateImpTypesMetrics(imps);
+
+        return context;
     }
 
     private AmpResponse toAmpResponse(BidRequest bidRequest, BidResponse bidResponse) {
-        // fetch targeting information from response bids
+        // Fetch targeting information from response bids
         final List<SeatBid> seatBids = bidResponse.getSeatbid();
 
         final Map<String, JsonNode> targeting = seatBids == null ? Collections.emptyMap() : seatBids.stream()
@@ -163,15 +175,18 @@ public class AmpHandler implements Handler<RoutingContext> {
                 .map(entry -> Tuple2.of(entry.getKey(), TextNode.valueOf(entry.getValue())))
                 .collect(Collectors.toMap(Tuple2::getLeft, Tuple2::getRight));
 
-        final ExtBidResponse extBidResponse = extResponseFrom(bidResponse);
+        final ExtResponseDebug extResponseDebug;
+        final Map<String, List<ExtBidderError>> errors;
+        // Fetch debug and errors information from response if requested
+        if (isDebugEnabled(bidRequest)) {
+            final ExtBidResponse extBidResponse = extResponseFrom(bidResponse);
 
-        // fetch debug information from response if requested
-        final ExtResponseDebug extResponseDebug = Objects.equals(bidRequest.getTest(), 1)
-                ? extResponseDebugFrom(extBidResponse) : null;
-
-        // fetch errors information from response if requested
-        final Map<String, List<ExtBidderError>> errors = Objects.equals(bidRequest.getTest(), 1)
-                ? errorsFrom(extBidResponse) : null;
+            extResponseDebug = extResponseDebugFrom(extBidResponse);
+            errors = errorsFrom(extBidResponse);
+        } else {
+            extResponseDebug = null;
+            errors = null;
+        }
 
         return AmpResponse.of(targeting, extResponseDebug, errors);
     }
@@ -179,7 +194,7 @@ public class AmpHandler implements Handler<RoutingContext> {
     private Map<String, String> targetingFrom(Bid bid, String bidder) {
         final ExtPrebid<ExtBidPrebid, ObjectNode> extBid;
         try {
-            extBid = Json.mapper.convertValue(bid.getExt(), EXT_PREBID_TYPE_REFERENCE);
+            extBid = mapper.mapper().convertValue(bid.getExt(), EXT_PREBID_TYPE_REFERENCE);
         } catch (IllegalArgumentException e) {
             throw new PreBidException(
                     String.format("Critical error while unpacking AMP targets: %s", e.getMessage()), e);
@@ -223,15 +238,38 @@ public class AmpHandler implements Handler<RoutingContext> {
         }
     }
 
-    private static ExtBidResponse extResponseFrom(BidResponse bidResponse) {
-        final ExtBidResponse extBidResponse;
+    /**
+     * Determines debug flag from {@link BidRequest}.
+     */
+    private boolean isDebugEnabled(BidRequest bidRequest) {
+        if (Objects.equals(bidRequest.getTest(), 1)) {
+            return true;
+        }
+        final ExtBidRequest extBidRequest = extBidRequestFrom(bidRequest);
+        final ExtRequestPrebid extRequestPrebid = extBidRequest != null ? extBidRequest.getPrebid() : null;
+        return extRequestPrebid != null && Objects.equals(extRequestPrebid.getDebug(), 1);
+    }
+
+    /**
+     * Extracts {@link ExtBidRequest} from {@link BidRequest}.
+     */
+    private ExtBidRequest extBidRequestFrom(BidRequest bidRequest) {
         try {
-            extBidResponse = Json.mapper.convertValue(bidResponse.getExt(), EXT_BID_RESPONSE_TYPE_REFERENCE);
+            return bidRequest.getExt() != null
+                    ? mapper.mapper().treeToValue(bidRequest.getExt(), ExtBidRequest.class)
+                    : null;
+        } catch (JsonProcessingException e) {
+            throw new PreBidException(String.format("Error decoding bidRequest.ext: %s", e.getMessage()), e);
+        }
+    }
+
+    private ExtBidResponse extResponseFrom(BidResponse bidResponse) {
+        try {
+            return mapper.mapper().convertValue(bidResponse.getExt(), EXT_BID_RESPONSE_TYPE_REFERENCE);
         } catch (IllegalArgumentException e) {
             throw new PreBidException(
                     String.format("Critical error while unpacking AMP bid response: %s", e.getMessage()), e);
         }
-        return extBidResponse;
     }
 
     private static ExtResponseDebug extResponseDebugFrom(ExtBidResponse extBidResponse) {
@@ -244,66 +282,76 @@ public class AmpHandler implements Handler<RoutingContext> {
 
     private void handleResult(AsyncResult<AmpResponse> responseResult, AmpEvent.AmpEventBuilder ampEventBuilder,
                               RoutingContext context, long startTime) {
-        final MetricName requestType = METRICS_CONTEXT.getRequestType();
-
-        // don't send the response if client has gone
-        if (context.response().closed()) {
-            logger.warn("The client already closed connection, response will be skipped");
-            metrics.updateRequestTypeMetric(requestType, MetricName.networkerr);
-            return;
-        }
-
-        context.response().exceptionHandler(throwable -> handleResponseException(throwable, requestType));
+        final MetricName metricRequestStatus;
+        final List<String> errorMessages;
+        final int status;
+        final String body;
 
         final String origin = originFrom(context);
         ampEventBuilder.origin(origin);
 
         // Add AMP headers
-        context.response()
-                .putHeader("AMP-Access-Control-Allow-Source-Origin", origin)
-                .putHeader("Access-Control-Expose-Headers", "AMP-Access-Control-Allow-Source-Origin");
-
-        final MetricName requestStatus;
-        final int status;
-        final List<String> errorMessages;
+        context.response().headers()
+                .add("AMP-Access-Control-Allow-Source-Origin", origin)
+                .add("Access-Control-Expose-Headers", "AMP-Access-Control-Allow-Source-Origin");
 
         if (responseResult.succeeded()) {
-            context.response().putHeader(HttpHeaders.CONTENT_TYPE, HttpHeaderValues.APPLICATION_JSON);
-            context.response().end(Json.encode(responseResult.result()));
-
-            requestStatus = MetricName.ok;
-            status = HttpResponseStatus.OK.code();
+            metricRequestStatus = MetricName.ok;
             errorMessages = Collections.emptyList();
+
+            status = HttpResponseStatus.OK.code();
+            context.response().headers().add(HttpUtil.CONTENT_TYPE_HEADER, HttpHeaderValues.APPLICATION_JSON);
+            body = mapper.encode(responseResult.result());
         } else {
             final Throwable exception = responseResult.cause();
             if (exception instanceof InvalidRequestException) {
-                requestStatus = MetricName.badinput;
+                metricRequestStatus = MetricName.badinput;
+
+                final InvalidRequestException invalidRequestException = (InvalidRequestException) exception;
+                errorMessages = invalidRequestException.getMessages().stream()
+                        .map(msg -> String.format("Invalid request format: %s", msg))
+                        .collect(Collectors.toList());
+                final String message = String.join("\n", errorMessages);
+                adminManager.accept(AdminManager.COUNTER_KEY, logger,
+                        logMessageFrom(invalidRequestException, message, context));
+
                 status = HttpResponseStatus.BAD_REQUEST.code();
-                errorMessages = ((InvalidRequestException) exception).getMessages();
+                body = message;
+            } else if (exception instanceof UnauthorizedAccountException) {
+                metricRequestStatus = MetricName.badinput;
+                final String message = String.format("Unauthorized: %s", exception.getMessage());
+                conditionalLogger.info(message, 100);
 
-                logger.info("Invalid request format: {0}", errorMessages);
-
-                context.response()
-                        .setStatusCode(status)
-                        .end(errorMessages.stream().map(msg -> String.format("Invalid request format: %s", msg))
-                                .collect(Collectors.joining("\n")));
-            } else {
-                logger.error("Critical error while running the auction", exception);
-
-                requestStatus = MetricName.err;
-                status = HttpResponseStatus.INTERNAL_SERVER_ERROR.code();
-                final String message = exception.getMessage();
                 errorMessages = Collections.singletonList(message);
 
-                context.response()
-                        .setStatusCode(status)
-                        .end(String.format("Critical error while running the auction: %s", message));
+                status = HttpResponseStatus.UNAUTHORIZED.code();
+                body = message;
+                String userId = ((UnauthorizedAccountException) exception).getAccountId();
+                metrics.updateAccountRequestRejectedMetrics(userId);
+            } else if (exception instanceof BlacklistedAppException
+                    || exception instanceof BlacklistedAccountException) {
+                metricRequestStatus = exception instanceof BlacklistedAccountException
+                        ? MetricName.blacklisted_account : MetricName.blacklisted_app;
+                final String message = String.format("Blacklisted: %s", exception.getMessage());
+                logger.debug(message);
+
+                errorMessages = Collections.singletonList(message);
+                status = HttpResponseStatus.FORBIDDEN.code();
+                body = message;
+            } else {
+                final String message = exception.getMessage();
+
+                metricRequestStatus = MetricName.err;
+                errorMessages = Collections.singletonList(message);
+                logger.error("Critical error while running the auction", exception);
+
+                status = HttpResponseStatus.INTERNAL_SERVER_ERROR.code();
+                body = String.format("Critical error while running the auction: %s", message);
             }
         }
 
-        metrics.updateRequestTimeMetric(clock.millis() - startTime);
-        metrics.updateRequestTypeMetric(requestType, requestStatus);
-        analyticsReporter.processEvent(ampEventBuilder.status(status).errors(errorMessages).build());
+        final AmpEvent ampEvent = ampEventBuilder.status(status).errors(errorMessages).build();
+        respondWith(context, status, body, startTime, metricRequestStatus, ampEvent);
     }
 
     private static String originFrom(RoutingContext context) {
@@ -319,8 +367,32 @@ public class AmpHandler implements Handler<RoutingContext> {
         return origin;
     }
 
-    private void handleResponseException(Throwable throwable, MetricName requestType) {
-        logger.warn("Failed to send amp response", throwable);
-        metrics.updateRequestTypeMetric(requestType, MetricName.networkerr);
+    private static String logMessageFrom(InvalidRequestException exception, String message, RoutingContext context) {
+        return exception.isNeedEnhancedLogging()
+                ? String.format("%s, Referer: %s", message, context.request().headers().get(HttpUtil.REFERER_HEADER))
+                : message;
+    }
+
+    private void respondWith(RoutingContext context, int status, String body, long startTime,
+                             MetricName metricRequestStatus, AmpEvent event) {
+        // don't send the response if client has gone
+        if (context.response().closed()) {
+            logger.warn("The client already closed connection, response will be skipped");
+            metrics.updateRequestTypeMetric(REQUEST_TYPE_METRIC, MetricName.networkerr);
+        } else {
+            context.response()
+                    .exceptionHandler(this::handleResponseException)
+                    .setStatusCode(status)
+                    .end(body);
+
+            metrics.updateRequestTimeMetric(clock.millis() - startTime);
+            metrics.updateRequestTypeMetric(REQUEST_TYPE_METRIC, metricRequestStatus);
+            analyticsReporter.processEvent(event);
+        }
+    }
+
+    private void handleResponseException(Throwable exception) {
+        logger.warn("Failed to send amp response: {0}", exception.getMessage());
+        metrics.updateRequestTypeMetric(REQUEST_TYPE_METRIC, MetricName.networkerr);
     }
 }

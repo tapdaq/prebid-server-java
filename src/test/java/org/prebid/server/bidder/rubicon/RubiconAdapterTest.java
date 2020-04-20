@@ -19,7 +19,6 @@ import com.iab.openrtb.request.User;
 import com.iab.openrtb.response.Bid;
 import com.iab.openrtb.response.BidResponse;
 import com.iab.openrtb.response.SeatBid;
-import io.vertx.core.json.Json;
 import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
@@ -70,17 +69,23 @@ import java.util.function.Function;
 import java.util.stream.Collectors;
 
 import static java.util.Arrays.asList;
-import static java.util.Collections.*;
+import static java.util.Collections.emptyList;
+import static java.util.Collections.singleton;
+import static java.util.Collections.singletonList;
+import static java.util.Collections.singletonMap;
 import static java.util.function.Function.identity;
-import static org.assertj.core.api.Assertions.*;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.tuple;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.BDDMockito.given;
 
 public class RubiconAdapterTest extends VertxTest {
 
     private static final String BIDDER = "rubicon";
+    private static final String COOKIE_FAMILY = BIDDER;
     private static final String ENDPOINT_URL = "http://exchange.org/";
-    private static final String USERSYNC_URL = "//usersync.org/";
     private static final String USER = "user";
     private static final String PASSWORD = "password";
 
@@ -94,28 +99,18 @@ public class RubiconAdapterTest extends VertxTest {
     private PreBidRequestContext preBidRequestContext;
     private ExchangeCall<BidRequest, BidResponse> exchangeCall;
     private RubiconAdapter adapter;
-    private RubiconUsersyncer usersyncer;
 
     @Before
     public void setUp() {
         adapterRequest = givenBidderCustomizable(identity(), identity());
         preBidRequestContext = givenPreBidRequestContextCustomizable(identity(), identity());
-        usersyncer = new RubiconUsersyncer(USERSYNC_URL);
-        adapter = new RubiconAdapter(usersyncer, ENDPOINT_URL, USER, PASSWORD);
-    }
-
-    @Test
-    public void creationShouldFailOnNullArguments() {
-        assertThatNullPointerException().isThrownBy(() -> new RubiconAdapter(null, null, null, null));
-        assertThatNullPointerException().isThrownBy(() -> new RubiconAdapter(usersyncer, null, null, null));
-        assertThatNullPointerException().isThrownBy(() -> new RubiconAdapter(usersyncer, ENDPOINT_URL, null, null));
-        assertThatNullPointerException().isThrownBy(() -> new RubiconAdapter(usersyncer, ENDPOINT_URL, USER, null));
+        adapter = new RubiconAdapter(COOKIE_FAMILY, ENDPOINT_URL, USER, PASSWORD, jacksonMapper);
     }
 
     @Test
     public void creationShouldFailOnInvalidEndpoints() {
         assertThatIllegalArgumentException()
-                .isThrownBy(() -> new RubiconAdapter(usersyncer, "invalid_url", USER, PASSWORD))
+                .isThrownBy(() -> new RubiconAdapter(COOKIE_FAMILY, "invalid_url", USER, PASSWORD, jacksonMapper))
                 .withMessage("URL supplied is not valid: invalid_url");
     }
 
@@ -241,7 +236,7 @@ public class RubiconAdapterTest extends VertxTest {
         // when and then
         assertThatThrownBy(() -> adapter.makeHttpRequests(adapterRequest, preBidRequestContext))
                 .isExactlyInstanceOf(PreBidException.class)
-                .hasMessage("No valid media types");
+                .hasMessage("Invalid ad unit/imp");
     }
 
     @Test
@@ -329,7 +324,7 @@ public class RubiconAdapterTest extends VertxTest {
                                 .publisher(Publisher.builder()
                                         .ext(mapper.valueToTree(RubiconPubExt.of(RubiconPubExtRp.of(2001))))
                                         .build())
-                                .ext(mapper.valueToTree(RubiconSiteExt.of(RubiconSiteExtRp.of(3001))))
+                                .ext(mapper.valueToTree(RubiconSiteExt.of(RubiconSiteExtRp.of(3001), null)))
                                 .build())
                         .device(Device.builder()
                                 .ua("userAgent")
@@ -494,7 +489,7 @@ public class RubiconAdapterTest extends VertxTest {
         // given
         final ObjectNode inventory = mapper.createObjectNode();
         inventory.set("rating", mapper.createArrayNode().add(new TextNode("5-star")));
-        inventory.set("prodtype", mapper.createArrayNode().add((new TextNode("tech"))));
+        inventory.set("prodtype", mapper.createArrayNode().add(new TextNode("tech")));
 
         adapterRequest = givenBidderCustomizable(identity(), builder -> builder.inventory(inventory));
 
@@ -513,7 +508,7 @@ public class RubiconAdapterTest extends VertxTest {
         // given
         final ObjectNode visitor = mapper.createObjectNode();
         visitor.set("ucat", mapper.createArrayNode().add(new TextNode("new")));
-        visitor.set("search", mapper.createArrayNode().add((new TextNode("iphone"))));
+        visitor.set("search", mapper.createArrayNode().add(new TextNode("iphone")));
 
         adapterRequest = givenBidderCustomizable(identity(), builder -> builder.visitor(visitor));
 
@@ -532,9 +527,9 @@ public class RubiconAdapterTest extends VertxTest {
     public void makeHttpRequestShouldReturnBidRequestWithConsentFromPreBidRequestUserExt() {
         // given
         preBidRequestContext = givenPreBidRequestContextCustomizable(identity(),
-                builder -> builder
-                        .user(User.builder().ext(mapper.valueToTree(ExtUser.of(null, "consent", null)))
-                                .build()));
+                builder -> builder.user(User.builder()
+                        .ext(mapper.valueToTree(ExtUser.builder().consent("consent").build()))
+                        .build()));
 
         // when
         final List<AdapterHttpRequest<BidRequest>> httpRequests = adapter.makeHttpRequests(adapterRequest,
@@ -550,11 +545,32 @@ public class RubiconAdapterTest extends VertxTest {
     }
 
     @Test
+    public void makeHttpRequestShouldReturnBidRequestWithNullUserExtRpWhenVisitorIsNull() {
+        // given
+        preBidRequestContext = givenPreBidRequestContextCustomizable(identity(),
+                builder -> builder.user(User.builder()
+                        .ext(mapper.valueToTree(ExtUser.builder().consent("consent").build()))
+                        .build()));
+
+        // when
+        final List<AdapterHttpRequest<BidRequest>> httpRequests = adapter.makeHttpRequests(adapterRequest,
+                preBidRequestContext);
+
+        // then
+        assertThat(httpRequests)
+                .extracting(r -> r.getPayload().getUser()).isNotNull()
+                .extracting(User::getExt).isNotNull()
+                .extracting(ext -> mapper.treeToValue(ext, RubiconUserExt.class))
+                .extracting(RubiconUserExt::getRp)
+                .containsNull();
+    }
+
+    @Test
     public void makeHttpRequestShouldFailWithPreBidExceptionIfUserExtIsNotValidJson() {
         // given
         preBidRequestContext = givenPreBidRequestContextCustomizable(identity(),
-                builder -> builder
-                        .user(User.builder().ext((ObjectNode) mapper.createObjectNode()
+                builder -> builder.user(User.builder()
+                        .ext(mapper.createObjectNode()
                                 .set("consent", mapper.createObjectNode())).build()));
 
         // when
@@ -567,8 +583,7 @@ public class RubiconAdapterTest extends VertxTest {
     public void makeHttpRequestShouldReturnBidRequestWithGdprFromPreBidRequestRegsExt() {
         // given
         preBidRequestContext = givenPreBidRequestContextCustomizable(identity(),
-                builder -> builder
-                        .regs(Regs.of(null, mapper.valueToTree(ExtRegs.of(5)))));
+                builder -> builder.regs(Regs.of(null, mapper.valueToTree(ExtRegs.of(5, null)))));
 
         // when
         final List<AdapterHttpRequest<BidRequest>> httpRequests = adapter.makeHttpRequests(adapterRequest,
@@ -626,8 +641,7 @@ public class RubiconAdapterTest extends VertxTest {
     }
 
     @Test
-    public void makeHttpRequestsShouldReturnBidRequestsWithoutVideoExtWhenMediaTypeIsVideoAndRubiconParamsVideoIsNull
-            () {
+    public void makeHttpRequestsShouldReturnRequestsWithoutVideoExtWhenMediaTypeIsVideoAndRubiconParamsVideoIsNull() {
         // given
         adapterRequest = AdapterRequest.of(BIDDER, singletonList(
                 givenAdUnitBidCustomizable(builder -> builder
@@ -658,8 +672,7 @@ public class RubiconAdapterTest extends VertxTest {
 
         exchangeCall = givenExchangeCallCustomizable(identity(),
                 bidResponseBuilder -> bidResponseBuilder.seatbid(singletonList(SeatBid.builder()
-                        .bid(singletonList(Bid.builder().impid("anotherAdUnitCode")
-                                .price(new BigDecimal(10)).build()))
+                        .bid(singletonList(Bid.builder().impid("anotherAdUnitCode").price(new BigDecimal(10)).build()))
                         .build())));
 
         // when and then

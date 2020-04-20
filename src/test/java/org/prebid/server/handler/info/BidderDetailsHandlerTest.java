@@ -12,13 +12,15 @@ import org.mockito.junit.MockitoJUnit;
 import org.mockito.junit.MockitoRule;
 import org.prebid.server.VertxTest;
 import org.prebid.server.bidder.BidderCatalog;
-import org.prebid.server.bidder.MetaInfo;
 import org.prebid.server.proto.response.BidderInfo;
 
+import java.util.HashSet;
+
+import static java.util.Arrays.asList;
 import static java.util.Collections.emptySet;
 import static java.util.Collections.singleton;
 import static java.util.Collections.singletonList;
-import static org.assertj.core.api.Assertions.assertThatNullPointerException;
+import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -33,16 +35,14 @@ public class BidderDetailsHandlerTest extends VertxTest {
 
     @Mock
     private BidderCatalog bidderCatalog;
-    @Mock
-    private MetaInfo metaInfo;
+
+    private BidderDetailsHandler handler;
     @Mock
     private RoutingContext routingContext;
     @Mock
     private HttpServerRequest httpRequest;
     @Mock
     private HttpServerResponse httpResponse;
-
-    private BidderDetailsHandler handler;
 
     @Before
     public void setUp() {
@@ -53,37 +53,66 @@ public class BidderDetailsHandlerTest extends VertxTest {
         given(httpResponse.setStatusCode(anyInt())).willReturn(httpResponse);
 
         given(httpRequest.getParam(anyString())).willReturn("bidderName1");
-        given(bidderCatalog.names()).willReturn(singleton("bidderName1"));
-        given(bidderCatalog.metaInfoByName(anyString())).willReturn(metaInfo);
 
-        given(metaInfo.info()).willReturn(givenBidderInfo());
+        given(bidderCatalog.names()).willReturn(new HashSet<>(asList("bidderName1", "bidderName2")));
+        given(bidderCatalog.bidderInfoByName(anyString())).willReturn(givenBidderInfo());
+        given(bidderCatalog.isActive("bidderName1")).willReturn(true);
+        given(bidderCatalog.isActive("bidderName2")).willReturn(false);
 
-        handler = new BidderDetailsHandler(bidderCatalog);
+        given(bidderCatalog.aliases()).willReturn(new HashSet<>(asList("bidderAlias1", "bidderAlias2")));
+        given(bidderCatalog.nameByAlias("bidderAlias1")).willReturn("bidderName1");
+        given(bidderCatalog.nameByAlias("bidderAlias2")).willReturn("bidderName2");
+
+        handler = new BidderDetailsHandler(bidderCatalog, jacksonMapper);
     }
 
     @Test
-    public void creationShouldFailOnNullArguments() {
-        assertThatNullPointerException().isThrownBy(() -> new BidderDetailsHandler(null));
+    public void creationShouldFailIfAllAliasIsConfigured() {
+        given(bidderCatalog.aliases()).willReturn(singleton("all"));
+        assertThatIllegalArgumentException().isThrownBy(() -> new BidderDetailsHandler(bidderCatalog, jacksonMapper));
     }
 
     @Test
     public void shouldRespondWithExpectedHeaders() {
         // given
-        handler = new BidderDetailsHandler(bidderCatalog);
+        handler = new BidderDetailsHandler(bidderCatalog, jacksonMapper);
 
         // when
         handler.handle(routingContext);
 
         // then
-        verify(httpResponse)
-                .putHeader(eq(new AsciiString("Content-Type")), eq(new AsciiString("application/json")));
+        verify(httpResponse).putHeader(eq(new AsciiString("Content-Type")), eq(new AsciiString("application/json")));
     }
 
     @Test
     public void shouldRespondWithHttpStatus404IfNoBidderFound() {
         // given
         given(bidderCatalog.names()).willReturn(emptySet());
-        handler = new BidderDetailsHandler(bidderCatalog);
+        handler = new BidderDetailsHandler(bidderCatalog, jacksonMapper);
+
+        // when
+        handler.handle(routingContext);
+
+        // then
+        verify(httpResponse).setStatusCode(404);
+    }
+
+    @Test
+    public void shouldRespondWithHttpStatus404IfBidderIsDisabled() {
+        // given
+        given(httpRequest.getParam(anyString())).willReturn("bidderName2");
+
+        // when
+        handler.handle(routingContext);
+
+        // then
+        verify(httpResponse).setStatusCode(404);
+    }
+
+    @Test
+    public void shouldRespondWithHttpStatus404IfBidderAliasIsDisabled() {
+        // given
+        given(httpRequest.getParam(anyString())).willReturn("bidderAlias2");
 
         // when
         handler.handle(routingContext);
@@ -99,29 +128,44 @@ public class BidderDetailsHandlerTest extends VertxTest {
 
         // then
         verify(httpResponse).end(
-                eq("{\"enabled\":true,\"maintainer\":{\"email\":\"test@email.org\"},\"capabilities\":"
-                        + "{\"app\":{\"mediaTypes\":[\"mediaType1\"]},\"site\":{\"mediaTypes\":[\"mediaType2\"]}},"
-                        + "\"gdpr\":{\"vendorId\":0,\"enforced\":true}}"));
+                eq("{\"maintainer\":{\"email\":\"test@email.org\"},\"capabilities\":{\"app\":"
+                        + "{\"mediaTypes\":[\"mediaType1\"]},\"site\":{\"mediaTypes\":[\"mediaType2\"]}}}"));
     }
 
     @Test
     public void shouldRespondWithExpectedBodyForBidderAlias() {
         // given
-        given(bidderCatalog.isAlias(anyString())).willReturn(true);
-        given(bidderCatalog.nameByAlias(anyString())).willReturn("bidderName1");
+        given(httpRequest.getParam(anyString())).willReturn("bidderAlias1");
 
         // when
         handler.handle(routingContext);
 
         // then
         verify(httpResponse).end(
-                eq("{\"enabled\":true,\"maintainer\":{\"email\":\"test@email.org\"},\"capabilities\":"
+                eq("{\"maintainer\":{\"email\":\"test@email.org\"},\"capabilities\":{\"app\":"
+                        + "{\"mediaTypes\":[\"mediaType1\"]},\"site\":{\"mediaTypes\":[\"mediaType2\"]}},"
+                        + "\"aliasOf\":\"bidderName1\"}"));
+    }
+
+    @Test
+    public void shouldRespondWithExpectedBodyForAllQueryParam() {
+        // given
+        given(httpRequest.getParam(anyString())).willReturn("all");
+
+        // when
+        handler.handle(routingContext);
+
+        // then
+        verify(httpResponse).end(
+                eq("{\"bidderAlias1\":{\"maintainer\":{\"email\":\"test@email.org\"},\"capabilities\":"
                         + "{\"app\":{\"mediaTypes\":[\"mediaType1\"]},\"site\":{\"mediaTypes\":[\"mediaType2\"]}},"
-                        + "\"gdpr\":{\"vendorId\":0,\"enforced\":true},\"aliasOf\":\"bidderName1\"}"));
+                        + "\"aliasOf\":\"bidderName1\"},"
+                        + "\"bidderName1\":{\"maintainer\":{\"email\":\"test@email.org\"},\"capabilities\":"
+                        + "{\"app\":{\"mediaTypes\":[\"mediaType1\"]},\"site\":{\"mediaTypes\":[\"mediaType2\"]}}}}"));
     }
 
     private static BidderInfo givenBidderInfo() {
-        return BidderInfo.create(true, "test@email.org",
-                singletonList("mediaType1"), singletonList("mediaType2"), null, 0, true);
+        return BidderInfo.create(true, "test@email.org", singletonList("mediaType1"),
+                singletonList("mediaType2"), null, 0, true, false);
     }
 }

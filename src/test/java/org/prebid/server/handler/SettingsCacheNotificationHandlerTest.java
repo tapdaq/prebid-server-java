@@ -34,7 +34,6 @@ public class SettingsCacheNotificationHandlerTest extends VertxTest {
     private CacheNotificationListener cacheNotificationListener;
 
     private SettingsCacheNotificationHandler handler;
-
     @Mock
     private RoutingContext routingContext;
     @Mock
@@ -44,7 +43,7 @@ public class SettingsCacheNotificationHandlerTest extends VertxTest {
 
     @Before
     public void setUp() {
-        handler = new SettingsCacheNotificationHandler(cacheNotificationListener);
+        handler = new SettingsCacheNotificationHandler(cacheNotificationListener, jacksonMapper);
 
         given(routingContext.request()).willReturn(httpRequest);
         given(routingContext.response()).willReturn(httpResponse);

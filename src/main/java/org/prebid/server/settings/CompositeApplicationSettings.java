@@ -4,6 +4,7 @@ import io.vertx.core.Future;
 import org.prebid.server.execution.Timeout;
 import org.prebid.server.settings.model.Account;
 import org.prebid.server.settings.model.StoredDataResult;
+import org.prebid.server.settings.model.StoredResponseDataResult;
 import org.prebid.server.settings.model.TriFunction;
 
 import java.util.Collections;
@@ -77,6 +78,20 @@ public class CompositeApplicationSettings implements ApplicationSettings {
         return proxy.getAmpStoredData(requestIds, Collections.emptySet(), timeout);
     }
 
+    @Override
+    public Future<StoredDataResult> getVideoStoredData(Set<String> requestIds, Set<String> impIds, Timeout timeout) {
+        return proxy.getVideoStoredData(requestIds, impIds, timeout);
+    }
+
+    /**
+     * Runs a process to get stored responses by a collection of ids from a chain of retrievers
+     * and returns {@link Future&lt;{@link StoredResponseDataResult }&gt;}
+     */
+    @Override
+    public Future<StoredResponseDataResult> getStoredResponses(Set<String> responseIds, Timeout timeout) {
+        return proxy.getStoredResponses(responseIds, timeout);
+    }
+
     /**
      * Decorates {@link ApplicationSettings} for a chain of retrievers
      */
@@ -124,6 +139,31 @@ public class CompositeApplicationSettings implements ApplicationSettings {
                     next != null ? next::getAmpStoredData : null);
         }
 
+        @Override
+        public Future<StoredDataResult> getVideoStoredData(Set<String> requestIds, Set<String> impIds,
+                                                           Timeout timeout) {
+            return getStoredRequests(requestIds, impIds, timeout,
+                    applicationSettings::getVideoStoredData, next != null ? next::getVideoStoredData : null);
+        }
+
+        @Override
+        public Future<StoredResponseDataResult> getStoredResponses(Set<String> responseIds, Timeout timeout) {
+            return getStoredResponses(responseIds, timeout, applicationSettings::getStoredResponses,
+                    next != null ? next::getStoredResponses : null);
+        }
+
+        private static Future<StoredResponseDataResult> getStoredResponses(
+                Set<String> responseIds, Timeout timeout,
+                BiFunction<Set<String>, Timeout, Future<StoredResponseDataResult>> retriever,
+                BiFunction<Set<String>, Timeout, Future<StoredResponseDataResult>> nextRetriever) {
+            return retriever.apply(responseIds, timeout)
+                    .compose(retrieverResult ->
+                            nextRetriever == null || retrieverResult.getErrors().isEmpty()
+                                    ? Future.succeededFuture(retrieverResult)
+                                    : getRemainingStoredResponses(responseIds, timeout,
+                                    retrieverResult.getStoredSeatBid(), nextRetriever));
+        }
+
         private static Future<StoredDataResult> getStoredRequests(
                 Set<String> requestIds, Set<String> impIds, Timeout timeout,
                 TriFunction<Set<String>, Set<String>, Timeout, Future<StoredDataResult>> retriever,
@@ -145,12 +185,20 @@ public class CompositeApplicationSettings implements ApplicationSettings {
 
             return retriever.apply(
                     subtractSets(requestIds, storedIdToRequest.keySet()),
-                    subtractSets(impIds, storedIdToImp.keySet()),
-                    timeout)
-                    .compose(result -> Future.succeededFuture(StoredDataResult.of(
+                    subtractSets(impIds, storedIdToImp.keySet()), timeout)
+                    .map(result -> StoredDataResult.of(
                             combineMaps(storedIdToRequest, result.getStoredIdToRequest()),
                             combineMaps(storedIdToImp, result.getStoredIdToImp()),
-                            result.getErrors())));
+                            result.getErrors()));
+        }
+
+        private static Future<StoredResponseDataResult> getRemainingStoredResponses(
+                Set<String> responseIds, Timeout timeout, Map<String, String> storedSeatBids,
+                BiFunction<Set<String>, Timeout, Future<StoredResponseDataResult>> retriever) {
+            return retriever.apply(subtractSets(responseIds, storedSeatBids.keySet()), timeout)
+                    .map(result -> StoredResponseDataResult.of(
+                            combineMaps(storedSeatBids, result.getStoredSeatBid()),
+                            result.getErrors()));
         }
 
         private static <T> Set<T> subtractSets(Set<T> set1, Set<T> set2) {

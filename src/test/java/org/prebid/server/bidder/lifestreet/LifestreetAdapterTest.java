@@ -50,18 +50,24 @@ import java.util.function.Function;
 import java.util.stream.Collectors;
 
 import static java.util.Arrays.asList;
-import static java.util.Collections.*;
+import static java.util.Collections.emptyList;
+import static java.util.Collections.emptySet;
+import static java.util.Collections.singleton;
+import static java.util.Collections.singletonList;
 import static java.util.function.Function.identity;
-import static org.assertj.core.api.Assertions.*;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
+import static org.assertj.core.api.Assertions.assertThatNullPointerException;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.tuple;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.BDDMockito.given;
 
 public class LifestreetAdapterTest extends VertxTest {
 
     private static final String BIDDER = "lifestreet";
+    private static final String COOKIE_FAMILY = BIDDER;
     private static final String ENDPOINT_URL = "http://endpoint.org/";
-    private static final String USERSYNC_URL = "//usersync.org/";
-    private static final String EXTERNAL_URL = "http://external.org/";
 
     @Rule
     public final MockitoRule mockitoRule = MockitoJUnit.rule();
@@ -73,26 +79,24 @@ public class LifestreetAdapterTest extends VertxTest {
     private PreBidRequestContext preBidRequestContext;
     private ExchangeCall<BidRequest, BidResponse> exchangeCall;
     private LifestreetAdapter adapter;
-    private LifestreetUsersyncer usersyncer;
 
     @Before
     public void setUp() {
         adapterRequest = givenBidder(identity());
         preBidRequestContext = givenPreBidRequestContext(identity(), identity());
-        usersyncer = new LifestreetUsersyncer(USERSYNC_URL, EXTERNAL_URL);
-        adapter = new LifestreetAdapter(usersyncer, ENDPOINT_URL);
+        adapter = new LifestreetAdapter(COOKIE_FAMILY, ENDPOINT_URL, jacksonMapper);
     }
 
     @Test
     public void creationShouldFailOnNullArguments() {
-        assertThatNullPointerException().isThrownBy(() -> new LifestreetAdapter(null, null));
-        assertThatNullPointerException().isThrownBy(() -> new LifestreetAdapter(usersyncer, null));
+        assertThatNullPointerException().isThrownBy(() -> new LifestreetAdapter(null, null, jacksonMapper));
+        assertThatNullPointerException().isThrownBy(() -> new LifestreetAdapter(COOKIE_FAMILY, null, jacksonMapper));
     }
 
     @Test
     public void creationShouldFailOnInvalidEndpointUrl() {
         assertThatIllegalArgumentException()
-                .isThrownBy(() -> new LifestreetAdapter(usersyncer, "invalid_url"))
+                .isThrownBy(() -> new LifestreetAdapter(COOKIE_FAMILY, "invalid_url", jacksonMapper))
                 .withMessage("URL supplied is not valid: invalid_url");
     }
 
@@ -202,9 +206,10 @@ public class LifestreetAdapterTest extends VertxTest {
                 builder -> builder
                         .timeoutMillis(1500L)
                         .tid("tid")
-                        .user(User.builder().ext(mapper.valueToTree(ExtUser.of(null, "consent", null))).build())
-                        .regs(Regs.of(0, mapper.valueToTree(ExtRegs.of(1))))
-        );
+                        .user(User.builder()
+                                .ext(mapper.valueToTree(ExtUser.builder().consent("consent").build()))
+                                .build())
+                        .regs(Regs.of(0, mapper.valueToTree(ExtRegs.of(1, null)))));
 
         given(uidsCookie.uidFrom(eq(BIDDER))).willReturn("buyerUid");
 
@@ -239,9 +244,9 @@ public class LifestreetAdapterTest extends VertxTest {
                                 .build())
                         .user(User.builder()
                                 .buyeruid("buyerUid")
-                                .ext(mapper.valueToTree(ExtUser.of(null, "consent", null)))
+                                .ext(mapper.valueToTree(ExtUser.builder().consent("consent").build()))
                                 .build())
-                        .regs(Regs.of(0, mapper.valueToTree(ExtRegs.of(1))))
+                        .regs(Regs.of(0, mapper.valueToTree(ExtRegs.of(1, null))))
                         .source(Source.builder()
                                 .fd(1)
                                 .tid("tid")

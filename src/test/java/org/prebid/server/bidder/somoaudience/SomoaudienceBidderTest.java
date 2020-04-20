@@ -14,7 +14,6 @@ import com.iab.openrtb.response.Bid;
 import com.iab.openrtb.response.BidResponse;
 import com.iab.openrtb.response.SeatBid;
 import io.netty.handler.codec.http.HttpHeaderValues;
-import io.vertx.core.http.HttpHeaders;
 import io.vertx.core.http.HttpMethod;
 import org.junit.Before;
 import org.junit.Test;
@@ -31,6 +30,7 @@ import org.prebid.server.proto.openrtb.ext.request.ExtRegs;
 import org.prebid.server.proto.openrtb.ext.request.ExtUser;
 import org.prebid.server.proto.openrtb.ext.request.somoaudience.ExtImpSomoaudience;
 import org.prebid.server.proto.openrtb.ext.response.BidType;
+import org.prebid.server.util.HttpUtil;
 
 import java.io.IOException;
 import java.math.BigDecimal;
@@ -44,15 +44,13 @@ import static org.assertj.core.api.Assertions.tuple;
 
 public class SomoaudienceBidderTest extends VertxTest {
 
-    private static final String APPLICATION_JSON = HttpHeaderValues.APPLICATION_JSON.toString() + ";"
-            + HttpHeaderValues.CHARSET.toString() + "=" + "utf-8";
     private static final String ENDPOINT_URL = "http://somoaudience.com";
 
     private SomoaudienceBidder somoaudienceBidder;
 
     @Before
     public void setUp() {
-        somoaudienceBidder = new SomoaudienceBidder(ENDPOINT_URL);
+        somoaudienceBidder = new SomoaudienceBidder(ENDPOINT_URL, jacksonMapper);
     }
 
     @Test
@@ -65,9 +63,9 @@ public class SomoaudienceBidderTest extends VertxTest {
                         .ext(mapper.valueToTree(ExtPrebid.of(
                                 null, ExtImpSomoaudience.of("placementId", BigDecimal.valueOf(1.39)))))
                         .build()))
-                .user(User.builder().ext(mapper.valueToTree(ExtUser.of(null, "consent", null))).build())
+                .user(User.builder().ext(mapper.valueToTree(ExtUser.builder().consent("consent").build())).build())
                 .device(Device.builder().ua("User Agent").ip("ip").dnt(1).language("en").build())
-                .regs(Regs.of(0, mapper.valueToTree(ExtRegs.of(1))))
+                .regs(Regs.of(0, mapper.valueToTree(ExtRegs.of(1, null))))
                 .build();
 
         // when
@@ -80,8 +78,9 @@ public class SomoaudienceBidderTest extends VertxTest {
                 .containsExactly("http://somoaudience.com?s=placementId");
         assertThat(result.getValue()).flatExtracting(httpRequest -> httpRequest.getHeaders().entries())
                 .extracting(Map.Entry::getKey, Map.Entry::getValue)
-                .containsOnly(tuple(HttpHeaders.CONTENT_TYPE.toString(), APPLICATION_JSON),
-                        tuple(HttpHeaders.ACCEPT.toString(), HttpHeaderValues.APPLICATION_JSON.toString()),
+                .containsOnly(
+                        tuple(HttpUtil.CONTENT_TYPE_HEADER.toString(), HttpUtil.APPLICATION_JSON_CONTENT_TYPE),
+                        tuple(HttpUtil.ACCEPT_HEADER.toString(), HttpHeaderValues.APPLICATION_JSON.toString()),
                         tuple("x-openrtb-version", "2.5"),
                         tuple("User-Agent", "User Agent"),
                         tuple("X-Forwarded-For", "ip"),
@@ -92,12 +91,36 @@ public class SomoaudienceBidderTest extends VertxTest {
                         .imp(singletonList(Imp.builder().banner(Banner.builder().build())
                                 .bidfloor(BigDecimal.valueOf(1.39))
                                 .build()))
-                        .user(User.builder().ext(mapper.valueToTree(ExtUser.of(null, "consent", null))).build())
-                        .regs(Regs.of(0, mapper.valueToTree(ExtRegs.of(1))))
+                        .user(User.builder()
+                                .ext(mapper.valueToTree(ExtUser.builder().consent("consent").build()))
+                                .build())
+                        .regs(Regs.of(0, mapper.valueToTree(ExtRegs.of(1, null))))
                         .ext(mapper.valueToTree(SomoaudienceReqExt.of("hb_pbs_1.0.0")))
                         .device(Device.builder().ua("User Agent").ip("ip").dnt(1).language("en").build())
-                        .build()
-        ));
+                        .build()));
+    }
+
+    @Test
+    public void makeHttpRequestsShouldTolerateMissingDeviceLanguage() {
+        // given
+        final BidRequest bidRequest = BidRequest.builder()
+                .imp(singletonList(Imp.builder()
+                        .banner(Banner.builder().build())
+                        .ext(mapper.valueToTree(ExtPrebid.of(
+                                null, ExtImpSomoaudience.of("placementId", BigDecimal.valueOf(1.39)))))
+                        .build()))
+                .user(User.builder().ext(mapper.valueToTree(ExtUser.builder().consent("consent").build())).build())
+                .device(Device.builder().ua("User Agent").ip("ip").dnt(1).language(null).build())
+                .build();
+
+        // when
+        final Result<List<HttpRequest<BidRequest>>> result = somoaudienceBidder.makeHttpRequests(bidRequest);
+
+        // then
+        assertThat(result.getErrors()).isEmpty();
+        assertThat(result.getValue()).flatExtracting(httpRequest -> httpRequest.getHeaders().entries())
+                .extracting(Map.Entry::getKey, Map.Entry::getValue)
+                .doesNotContain(tuple("Accept-Language", null));
     }
 
     @Test
@@ -137,11 +160,13 @@ public class SomoaudienceBidderTest extends VertxTest {
                 .ext(mapper.valueToTree(SomoaudienceReqExt.of("hb_pbs_1.0.0")))
                 .build());
         final String expectedVideoSting = mapper.writeValueAsString(BidRequest.builder()
-                .imp(singletonList(Imp.builder().video(Video.builder().build()).bidfloor(BigDecimal.valueOf(1.97)).build()))
+                .imp(singletonList(
+                        Imp.builder().video(Video.builder().build()).bidfloor(BigDecimal.valueOf(1.97)).build()))
                 .ext(mapper.valueToTree(SomoaudienceReqExt.of("hb_pbs_1.0.0")))
                 .build());
         final String expectedNativeString = mapper.writeValueAsString(BidRequest.builder()
-                .imp(singletonList(Imp.builder().xNative(Native.builder().build()).bidfloor(BigDecimal.valueOf(2.52)).build()))
+                .imp(singletonList(
+                        Imp.builder().xNative(Native.builder().build()).bidfloor(BigDecimal.valueOf(2.52)).build()))
                 .ext(mapper.valueToTree(SomoaudienceReqExt.of("hb_pbs_1.0.0")))
                 .build());
 
@@ -220,7 +245,8 @@ public class SomoaudienceBidderTest extends VertxTest {
         assertThat(result.getValue()).hasSize(1)
                 .extracting(httpRequest -> mapper.readValue(httpRequest.getBody(), BidRequest.class))
                 .flatExtracting(BidRequest::getImp).hasSize(1)
-                .extracting(Imp::getId).containsExactly("impId2");
+                .extracting(Imp::getId)
+                .containsExactly("impId2");
     }
 
     @Test
@@ -326,7 +352,8 @@ public class SomoaudienceBidderTest extends VertxTest {
                         .bid(singletonList(Bid.builder().impid("impId").build()))
                         .build()))
                 .build());
-        final BidRequest bidRequest = BidRequest.builder().imp(singletonList(Imp.builder().id("impId").build())).build();
+        final BidRequest bidRequest =
+                BidRequest.builder().imp(singletonList(Imp.builder().id("impId").build())).build();
 
         final HttpCall<BidRequest> httpCall = givenHttpCall(response);
 
@@ -347,7 +374,8 @@ public class SomoaudienceBidderTest extends VertxTest {
                         .bid(singletonList(Bid.builder().impid("impId").build()))
                         .build()))
                 .build());
-        final BidRequest bidRequest = BidRequest.builder().imp(singletonList(Imp.builder().id("impId2").build())).build();
+        final BidRequest bidRequest =
+                BidRequest.builder().imp(singletonList(Imp.builder().id("impId2").build())).build();
 
         final HttpCall<BidRequest> httpCall = givenHttpCall(response);
 
@@ -384,7 +412,8 @@ public class SomoaudienceBidderTest extends VertxTest {
         assertThat(result.getErrors()).isEmpty();
         assertThat(result.getValue()).hasSize(2)
                 .extracting(BidderBid::getBid)
-                .extracting(Bid::getId).containsExactly("bidId1", "bidId2");
+                .extracting(Bid::getId)
+                .containsExactly("bidId1", "bidId2");
     }
 
     @Test
@@ -413,9 +442,9 @@ public class SomoaudienceBidderTest extends VertxTest {
         // then
         assertThat(result.getErrors()).hasSize(1)
                 .containsExactly(BidderError.badServerResponse(
-                        "Failed to decode: Unexpected end-of-input: expected close marker for Object (start marker at" +
-                                " [Source: (String)\"{\"; line: 1, column: 1])\n at [Source: (String)\"{\"; line: 1, " +
-                                "column: 3]"));
+                        "Failed to decode: Unexpected end-of-input: expected close marker for Object (start marker at"
+                                + " [Source: (String)\"{\"; line: 1, column: 1])\n at [Source: (String)\"{\"; line: 1, "
+                                + "column: 3]"));
     }
 
     private static HttpCall<BidRequest> givenHttpCall(String body) {

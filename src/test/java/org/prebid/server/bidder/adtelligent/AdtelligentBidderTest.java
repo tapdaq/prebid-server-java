@@ -11,9 +11,7 @@ import com.iab.openrtb.response.Bid;
 import com.iab.openrtb.response.BidResponse;
 import com.iab.openrtb.response.SeatBid;
 import io.netty.handler.codec.http.HttpHeaderValues;
-import io.vertx.core.http.HttpHeaders;
 import io.vertx.core.http.HttpMethod;
-import io.vertx.core.json.Json;
 import org.junit.Before;
 import org.junit.Test;
 import org.prebid.server.VertxTest;
@@ -29,6 +27,7 @@ import org.prebid.server.proto.openrtb.ext.request.ExtRegs;
 import org.prebid.server.proto.openrtb.ext.request.ExtUser;
 import org.prebid.server.proto.openrtb.ext.request.adtelligent.ExtImpAdtelligent;
 import org.prebid.server.proto.openrtb.ext.response.BidType;
+import org.prebid.server.util.HttpUtil;
 
 import java.math.BigDecimal;
 import java.util.List;
@@ -41,15 +40,13 @@ import static org.assertj.core.api.Assertions.tuple;
 
 public class AdtelligentBidderTest extends VertxTest {
 
-    private static final String APPLICATION_JSON = HttpHeaderValues.APPLICATION_JSON.toString() + ";"
-            + HttpHeaderValues.CHARSET.toString() + "=" + "utf-8";
     private static final String ENDPOINT_URL = "http://adtelligent.com";
 
     private AdtelligentBidder adtelligentBidder;
 
     @Before
     public void setUp() {
-        adtelligentBidder = new AdtelligentBidder(ENDPOINT_URL);
+        adtelligentBidder = new AdtelligentBidder(ENDPOINT_URL, jacksonMapper);
     }
 
     @Test
@@ -59,9 +56,12 @@ public class AdtelligentBidderTest extends VertxTest {
         final BidRequest bidRequest = BidRequest.builder()
                 .imp(singletonList(Imp.builder()
                         .banner(Banner.builder().build())
-                        .ext(Json.mapper.valueToTree(ExtPrebid.of(null, ExtImpAdtelligent.of(15, 1, 2, BigDecimal.valueOf(3))))).build()))
-                .user(User.builder().ext(Json.mapper.valueToTree(ExtUser.of(null, "consent", null))).build())
-                .regs(Regs.of(0, Json.mapper.valueToTree(ExtRegs.of(1))))
+                        .ext(mapper.valueToTree(
+                                ExtPrebid.of(null, ExtImpAdtelligent.of(15, 1, 2, BigDecimal.valueOf(3))))).build()))
+                .user(User.builder()
+                        .ext(mapper.valueToTree(ExtUser.builder().consent("consent").build()))
+                        .build())
+                .regs(Regs.of(0, mapper.valueToTree(ExtRegs.of(1, null))))
                 .build();
 
         // when
@@ -73,17 +73,23 @@ public class AdtelligentBidderTest extends VertxTest {
         assertThat(result.getValue()).extracting(HttpRequest::getUri).containsExactly("http://adtelligent.com?aid=15");
         assertThat(result.getValue()).flatExtracting(httpRequest -> httpRequest.getHeaders().entries())
                 .extracting(Map.Entry::getKey, Map.Entry::getValue)
-                .containsOnly(tuple(HttpHeaders.CONTENT_TYPE.toString(), APPLICATION_JSON),
-                        tuple(HttpHeaders.ACCEPT.toString(), HttpHeaderValues.APPLICATION_JSON.toString()));
-        assertThat(result.getValue()).extracting(HttpRequest::getBody).containsExactly(Json.mapper.writeValueAsString(
+                .containsOnly(
+                        tuple(HttpUtil.CONTENT_TYPE_HEADER.toString(), HttpUtil.APPLICATION_JSON_CONTENT_TYPE),
+                        tuple(HttpUtil.ACCEPT_HEADER.toString(), HttpHeaderValues.APPLICATION_JSON.toString()));
+        assertThat(result.getValue()).extracting(HttpRequest::getBody).containsExactly(mapper.writeValueAsString(
                 BidRequest.builder()
-                        .imp(singletonList(Imp.builder().banner(Banner.builder().build()).bidfloor(BigDecimal.valueOf(3))
-                                .ext(Json.mapper.valueToTree(AdtelligentImpExt.of(ExtImpAdtelligent.of(15, 1, 2, BigDecimal.valueOf(3)))))
-                                .build()))
-                        .user(User.builder().ext(Json.mapper.valueToTree(ExtUser.of(null, "consent", null))).build())
-                        .regs(Regs.of(0, Json.mapper.valueToTree(ExtRegs.of(1))))
-                        .build()
-        ));
+                        .imp(singletonList(
+                                Imp.builder()
+                                        .banner(Banner.builder().build())
+                                        .bidfloor(BigDecimal.valueOf(3))
+                                        .ext(mapper.valueToTree(AdtelligentImpExt.of(
+                                                ExtImpAdtelligent.of(15, 1, 2, BigDecimal.valueOf(3)))))
+                                        .build()))
+                        .user(User.builder()
+                                .ext(mapper.valueToTree(ExtUser.builder().consent("consent").build()))
+                                .build())
+                        .regs(Regs.of(0, mapper.valueToTree(ExtRegs.of(1, null))))
+                        .build()));
     }
 
     @Test
@@ -92,7 +98,8 @@ public class AdtelligentBidderTest extends VertxTest {
         final BidRequest bidRequest = BidRequest.builder()
                 .imp(singletonList(Imp.builder()
                         .id("impId")
-                        .ext(Json.mapper.valueToTree(ExtPrebid.of(null, ExtImpAdtelligent.of(15, 1, 2, BigDecimal.valueOf(3))))).build()))
+                        .ext(mapper.valueToTree(
+                                ExtPrebid.of(null, ExtImpAdtelligent.of(15, 1, 2, BigDecimal.valueOf(3))))).build()))
                 .build();
 
         // when
@@ -112,7 +119,7 @@ public class AdtelligentBidderTest extends VertxTest {
                 .imp(singletonList(Imp.builder()
                         .id("impId")
                         .banner(Banner.builder().build())
-                        .ext(Json.mapper.valueToTree(ExtPrebid.of(null, null))).build()))
+                        .ext(mapper.valueToTree(ExtPrebid.of(null, null))).build()))
                 .build();
         // when
         final Result<List<HttpRequest<BidRequest>>> result = adtelligentBidder.makeHttpRequests(bidRequest);
@@ -130,11 +137,12 @@ public class AdtelligentBidderTest extends VertxTest {
                 .imp(asList(Imp.builder()
                                 .id("impId")
                                 .banner(Banner.builder().build())
-                                .ext(Json.mapper.valueToTree(ExtPrebid.of(null, null))).build(),
+                                .ext(mapper.valueToTree(ExtPrebid.of(null, null))).build(),
                         Imp.builder()
                                 .id("impId2")
                                 .banner(Banner.builder().build())
-                                .ext(Json.mapper.valueToTree(ExtPrebid.of(null, ExtImpAdtelligent.of(15, 1, 2, BigDecimal.valueOf(3)))))
+                                .ext(mapper.valueToTree(
+                                        ExtPrebid.of(null, ExtImpAdtelligent.of(15, 1, 2, BigDecimal.valueOf(3)))))
                                 .build()))
                 .build();
 
@@ -146,7 +154,7 @@ public class AdtelligentBidderTest extends VertxTest {
                 .containsExactly(BidderError.badInput("ignoring imp id=impId, extImpBidder is empty"));
         assertThat(result.getValue()).extracting(HttpRequest::getUri).containsExactly("http://adtelligent.com?aid=15");
         assertThat(result.getValue()).hasSize(1)
-                .extracting(httpRequest -> Json.mapper.readValue(httpRequest.getBody(), BidRequest.class))
+                .extracting(httpRequest -> mapper.readValue(httpRequest.getBody(), BidRequest.class))
                 .flatExtracting(BidRequest::getImp).hasSize(1)
                 .extracting(Imp::getId).containsExactly("impId2");
     }
@@ -158,7 +166,7 @@ public class AdtelligentBidderTest extends VertxTest {
                 .imp(singletonList(Imp.builder()
                         .banner(Banner.builder().build())
                         .bidfloor(BigDecimal.valueOf(16))
-                        .ext(Json.mapper.valueToTree(ExtPrebid.of(null, ExtImpAdtelligent.of(15, 1, 2, null))))
+                        .ext(mapper.valueToTree(ExtPrebid.of(null, ExtImpAdtelligent.of(15, 1, 2, null))))
                         .build()))
                 .build();
 
@@ -179,11 +187,13 @@ public class AdtelligentBidderTest extends VertxTest {
         final BidRequest bidRequest = BidRequest.builder()
                 .imp(asList(Imp.builder()
                                 .banner(Banner.builder().build())
-                                .ext(Json.mapper.valueToTree(ExtPrebid.of(null, ExtImpAdtelligent.of(15, 1, 2, BigDecimal.valueOf(3)))))
+                                .ext(mapper.valueToTree(
+                                        ExtPrebid.of(null, ExtImpAdtelligent.of(15, 1, 2, BigDecimal.valueOf(3)))))
                                 .build(),
                         Imp.builder()
                                 .banner(Banner.builder().build())
-                                .ext(Json.mapper.valueToTree(ExtPrebid.of(null, ExtImpAdtelligent.of(16, 1, 2, BigDecimal.valueOf(3)))))
+                                .ext(mapper.valueToTree(
+                                        ExtPrebid.of(null, ExtImpAdtelligent.of(16, 1, 2, BigDecimal.valueOf(3)))))
                                 .build()))
                 .build();
 
@@ -201,11 +211,13 @@ public class AdtelligentBidderTest extends VertxTest {
         final BidRequest bidRequest = BidRequest.builder()
                 .imp(asList(Imp.builder()
                                 .banner(Banner.builder().build())
-                                .ext(Json.mapper.valueToTree(ExtPrebid.of(null, ExtImpAdtelligent.of(15, 1, 2, BigDecimal.valueOf(3)))))
+                                .ext(mapper.valueToTree(
+                                        ExtPrebid.of(null, ExtImpAdtelligent.of(15, 1, 2, BigDecimal.valueOf(3)))))
                                 .build(),
                         Imp.builder()
                                 .banner(Banner.builder().build())
-                                .ext(Json.mapper.valueToTree(ExtPrebid.of(null, ExtImpAdtelligent.of(15, 1, 2, BigDecimal.valueOf(3)))))
+                                .ext(mapper.valueToTree(
+                                        ExtPrebid.of(null, ExtImpAdtelligent.of(15, 1, 2, BigDecimal.valueOf(3)))))
                                 .build()))
                 .build();
 
@@ -225,10 +237,11 @@ public class AdtelligentBidderTest extends VertxTest {
                         .bid(singletonList(Bid.builder().impid("impId").build()))
                         .build()))
                 .build());
-        final BidRequest bidRequest = BidRequest.builder().imp(singletonList(Imp.builder().id("impId").build()))
+        final BidRequest bidRequest = BidRequest.builder()
+                .imp(singletonList(Imp.builder().id("impId").build()))
                 .build();
 
-        final HttpCall httpCall = givenHttpCall(response);
+        final HttpCall<BidRequest> httpCall = givenHttpCall(response);
 
         // when
         final Result<List<BidderBid>> result = adtelligentBidder.makeBids(httpCall, bidRequest);
@@ -247,10 +260,11 @@ public class AdtelligentBidderTest extends VertxTest {
                         .bid(singletonList(Bid.builder().id("bidId").impid("invalidId").build()))
                         .build()))
                 .build());
-        final BidRequest bidRequest = BidRequest.builder().imp(singletonList(Imp.builder().id("impId").build()))
+        final BidRequest bidRequest = BidRequest.builder()
+                .imp(singletonList(Imp.builder().id("impId").build()))
                 .build();
 
-        final HttpCall httpCall = givenHttpCall(response);
+        final HttpCall<BidRequest> httpCall = givenHttpCall(response);
 
         // when
         final Result<List<BidderBid>> result = adtelligentBidder.makeBids(httpCall, bidRequest);
@@ -271,10 +285,11 @@ public class AdtelligentBidderTest extends VertxTest {
                                 Bid.builder().id("bidId2").impid("impId").build()))
                         .build()))
                 .build());
-        final BidRequest bidRequest = BidRequest.builder().imp(singletonList(Imp.builder().id("impId").build()))
+        final BidRequest bidRequest = BidRequest.builder()
+                .imp(singletonList(Imp.builder().id("impId").build()))
                 .build();
 
-        final HttpCall httpCall = givenHttpCall(response);
+        final HttpCall<BidRequest> httpCall = givenHttpCall(response);
 
         // when
         final Result<List<BidderBid>> result = adtelligentBidder.makeBids(httpCall, bidRequest);
@@ -300,10 +315,11 @@ public class AdtelligentBidderTest extends VertxTest {
                                 .bid(singletonList(Bid.builder().id("bidId2").impid("impId2").build()))
                                 .build()))
                 .build());
-        final BidRequest bidRequest = BidRequest.builder().imp(asList(Imp.builder().id("impId1").build(),
-                Imp.builder().id("impId2").build())).build();
+        final BidRequest bidRequest = BidRequest.builder()
+                .imp(asList(Imp.builder().id("impId1").build(), Imp.builder().id("impId2").build()))
+                .build();
 
-        final HttpCall httpCall = givenHttpCall(response);
+        final HttpCall<BidRequest> httpCall = givenHttpCall(response);
 
         // when
         final Result<List<BidderBid>> result = adtelligentBidder.makeBids(httpCall, bidRequest);
@@ -324,10 +340,11 @@ public class AdtelligentBidderTest extends VertxTest {
                         .bid(singletonList(Bid.builder().impid("impId").build()))
                         .build()))
                 .build());
-        final BidRequest bidRequest = BidRequest.builder().imp(singletonList(Imp.builder().id("impId").build()))
+        final BidRequest bidRequest = BidRequest.builder()
+                .imp(singletonList(Imp.builder().id("impId").build()))
                 .build();
 
-        final HttpCall httpCall = givenHttpCall(response);
+        final HttpCall<BidRequest> httpCall = givenHttpCall(response);
 
         // when
         final Result<List<BidderBid>> result = adtelligentBidder.makeBids(httpCall, bidRequest);
@@ -347,11 +364,12 @@ public class AdtelligentBidderTest extends VertxTest {
                         .bid(singletonList(Bid.builder().impid("impId").build()))
                         .build()))
                 .build());
-        final BidRequest bidRequest = BidRequest.builder().imp(singletonList(
-                Imp.builder().video(Video.builder().build()).banner(Banner.builder().build()).id("impId").build()))
+        final BidRequest bidRequest = BidRequest.builder()
+                .imp(singletonList(Imp.builder().video(Video.builder().build())
+                        .banner(Banner.builder().build()).id("impId").build()))
                 .build();
 
-        final HttpCall httpCall = givenHttpCall(response);
+        final HttpCall<BidRequest> httpCall = givenHttpCall(response);
 
         // when
         final Result<List<BidderBid>> result = adtelligentBidder.makeBids(httpCall, bidRequest);
@@ -367,7 +385,7 @@ public class AdtelligentBidderTest extends VertxTest {
             throws JsonProcessingException {
         // given
         final String response = mapper.writeValueAsString(BidResponse.builder().build());
-        final HttpCall httpCall = givenHttpCall(response);
+        final HttpCall<BidRequest> httpCall = givenHttpCall(response);
 
         // when
         final Result<List<BidderBid>> result = adtelligentBidder.makeBids(httpCall, BidRequest.builder().build());
@@ -380,7 +398,7 @@ public class AdtelligentBidderTest extends VertxTest {
     @Test
     public void makeBidsShouldReturnEmptyBidderWithErrorWhenResponseCantBeParsed() {
         // given
-        final HttpCall httpCall = givenHttpCall("{");
+        final HttpCall<BidRequest> httpCall = givenHttpCall("{");
 
         // when
         final Result<List<BidderBid>> result = adtelligentBidder.makeBids(httpCall, BidRequest.builder().build());
@@ -388,12 +406,12 @@ public class AdtelligentBidderTest extends VertxTest {
         // then
         assertThat(result.getErrors()).hasSize(1)
                 .containsExactly(BidderError.badServerResponse(
-                        "Failed to decode: Unexpected end-of-input: expected close marker for Object (start marker at" +
-                                " [Source: (String)\"{\"; line: 1, column: 1])\n at [Source: (String)\"{\"; line: 1, " +
-                                "column: 3]"));
+                        "Failed to decode: Unexpected end-of-input: expected close marker for Object (start marker at"
+                                + " [Source: (String)\"{\"; line: 1, column: 1])\n at [Source: (String)\"{\"; line: 1, "
+                                + "column: 3]"));
     }
 
-    private static HttpCall givenHttpCall(String body) {
+    private static HttpCall<BidRequest> givenHttpCall(String body) {
         return HttpCall.success(null, HttpResponse.of(200, null, body), null);
     }
 }

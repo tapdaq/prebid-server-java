@@ -2,7 +2,22 @@ adapters:
   adkerneladn:
     enabled: false
     endpoint: http://tag.adkernel.com/rtbpub?account=
-    usersync-url: https://tag.adkernel.com/syncr?gdpr={{gdpr}}&gdpr_consent={{gdpr_consent}}&r=
     pbs-enforces-gdpr: true
+    modifying-vast-xml-allowed: true
     deprecated-names:
     aliases:
+    meta-info:
+      maintainer-email: prebid-dev@adkernel.com
+      app-media-types:
+        - banner
+      site-media-types:
+        - banner
+        - video
+      supported-vendors:
+      vendor-id: 14
+    usersync:
+      url: https://tag.adkernel.com/syncr?gdpr={{gdpr}}&gdpr_consent={{gdpr_consent}}&us_privacy={{us_privacy}}&r=
+      redirect-url: /setuid?bidder=adkernelAdn&gdpr={{gdpr}}&gdpr_consent={{gdpr_consent}}&us_privacy={{us_privacy}}&uid=${UID}
+      cookie-family-name: adkernelAdn
+      type: redirect
+      support-cors: false

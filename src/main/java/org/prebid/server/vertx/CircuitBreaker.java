@@ -4,8 +4,12 @@ import io.vertx.circuitbreaker.CircuitBreakerOptions;
 import io.vertx.circuitbreaker.CircuitBreakerState;
 import io.vertx.core.Future;
 import io.vertx.core.Handler;
+import io.vertx.core.Promise;
 import io.vertx.core.Vertx;
+import io.vertx.core.logging.Logger;
+import io.vertx.core.logging.LoggerFactory;
 
+import java.time.Clock;
 import java.util.Objects;
 
 /**
@@ -14,13 +18,22 @@ import java.util.Objects;
  */
 public class CircuitBreaker {
 
+    private static final Logger logger = LoggerFactory.getLogger(CircuitBreaker.class);
+
     private final io.vertx.circuitbreaker.CircuitBreaker breaker;
+    private final Vertx vertx;
     private final long openingIntervalMs;
+    private final Clock clock;
 
-    private long lastFailure;
+    private volatile long lastFailureTime;
 
-    public CircuitBreaker(String name, Vertx vertx, int openingThreshold, long openingIntervalMs,
-                          long closingIntervalMs) {
+    public CircuitBreaker(String name,
+                          Vertx vertx,
+                          int openingThreshold,
+                          long openingIntervalMs,
+                          long closingIntervalMs,
+                          Clock clock) {
+
         breaker = io.vertx.circuitbreaker.CircuitBreaker.create(
                 Objects.requireNonNull(name),
                 Objects.requireNonNull(vertx),
@@ -28,58 +41,73 @@ public class CircuitBreaker {
                         .setMaxFailures(openingThreshold)
                         .setResetTimeout(closingIntervalMs));
 
+        this.vertx = vertx;
         this.openingIntervalMs = openingIntervalMs;
+        this.clock = Objects.requireNonNull(clock);
     }
 
     /**
      * Executes the given operation with the circuit breaker control.
      */
-    public <T> Future<T> execute(Handler<Future<T>> command) {
-        return breaker.execute(future -> execute(command, future));
+    public <T> Future<T> execute(Handler<Promise<T>> command) {
+        return breaker.execute(promise -> execute(command, promise));
     }
 
     /**
-     * Executes operation and handle result of it on given {@link Future}.
+     * Executes operation and handle result of it on given {@link Promise}.
      */
-    private <T> void execute(Handler<Future<T>> command, Future<T> future) {
-        final Future<T> passedFuture = Future.future();
-        command.handle(passedFuture);
+    private <T> void execute(Handler<Promise<T>> command, Promise<T> promise) {
+        final Promise<T> passedPromise = Promise.promise();
+        command.handle(passedPromise);
 
-        passedFuture
-                .compose(response -> succeedBreaker(response, future))
-                .recover(exception -> failBreaker(exception, future));
+        passedPromise.future()
+                .compose(response -> succeedBreaker(response, promise))
+                .recover(exception -> failBreaker(exception, promise));
     }
 
     /**
-     * Succeeds given {@link Future} and returns it.
+     * Succeeds given {@link Promise} and returns corresponding {@link Future}.
      */
-    private static <T> Future<T> succeedBreaker(T result, Future<T> future) {
-        future.complete(result);
-        return future;
+    private static <T> Future<T> succeedBreaker(T result, Promise<T> promise) {
+        promise.complete(result);
+        return promise.future();
     }
 
     /**
-     * Fails given {@link Future} and returns it.
+     * Fails given {@link Promise} and returns corresponding {@link Future}.
      */
-    private <T> Future<T> failBreaker(Throwable exception, Future<T> future) {
-        ensureToIncrementFailureCount();
+    private <T> Future<T> failBreaker(Throwable exception, Promise<T> promise) {
+        final Promise<T> ensureStatePromise = Promise.promise();
+        vertx.executeBlocking(this::ensureState, false, ensureStatePromise);
 
-        future.fail(exception);
-        return future;
+        return ensureStatePromise.future()
+                .recover(throwable -> {
+                    logger.warn("Resetting circuit breaker state failed", throwable);
+                    promise.fail(throwable);
+                    return promise.future();
+                })
+                .compose(ignored -> { // ensuring state succeeded, propagate real error
+                    promise.fail(exception);
+                    return promise.future();
+                });
     }
 
     /**
-     * Reset failure counter to adjust open-circuit time frame.
+     * Resets failure counter to adjust open-circuit time frame.
+     * <p>
+     * Note: the operations {@link io.vertx.circuitbreaker.CircuitBreaker#state()}
+     * and {@link io.vertx.circuitbreaker.CircuitBreaker#reset()} can take a while,
+     * so it is better to perform them on a worker thread.
      */
-    private void ensureToIncrementFailureCount() {
-        final long currentTimeMillis = System.currentTimeMillis();
-
-        if (breaker.state() == CircuitBreakerState.CLOSED && lastFailure > 0
-                && currentTimeMillis - lastFailure > openingIntervalMs) {
+    private <T> void ensureState(Promise<T> executeBlockingPromise) {
+        final long currentTime = clock.millis();
+        if (breaker.state() == CircuitBreakerState.CLOSED && lastFailureTime > 0
+                && currentTime - lastFailureTime > openingIntervalMs) {
             breaker.reset();
         }
 
-        lastFailure = currentTimeMillis;
+        lastFailureTime = currentTime;
+        executeBlockingPromise.complete();
     }
 
     /**

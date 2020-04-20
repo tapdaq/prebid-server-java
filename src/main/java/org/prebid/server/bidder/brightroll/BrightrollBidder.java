@@ -7,28 +7,29 @@ import com.iab.openrtb.request.BidRequest;
 import com.iab.openrtb.request.Device;
 import com.iab.openrtb.request.Format;
 import com.iab.openrtb.request.Imp;
+import com.iab.openrtb.request.Video;
 import com.iab.openrtb.response.Bid;
 import com.iab.openrtb.response.BidResponse;
 import io.vertx.core.MultiMap;
 import io.vertx.core.http.HttpHeaders;
 import io.vertx.core.http.HttpMethod;
-import io.vertx.core.json.DecodeException;
-import io.vertx.core.json.EncodeException;
-import io.vertx.core.json.Json;
 import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.prebid.server.bidder.Bidder;
-import org.prebid.server.bidder.BidderUtil;
+import org.prebid.server.bidder.brightroll.model.PublisherOverride;
 import org.prebid.server.bidder.model.BidderBid;
 import org.prebid.server.bidder.model.BidderError;
 import org.prebid.server.bidder.model.HttpCall;
 import org.prebid.server.bidder.model.HttpRequest;
 import org.prebid.server.bidder.model.Result;
 import org.prebid.server.exception.PreBidException;
+import org.prebid.server.json.DecodeException;
+import org.prebid.server.json.EncodeException;
+import org.prebid.server.json.JacksonMapper;
 import org.prebid.server.proto.openrtb.ext.ExtPrebid;
 import org.prebid.server.proto.openrtb.ext.request.brightroll.ExtImpBrightroll;
 import org.prebid.server.proto.openrtb.ext.response.BidType;
 import org.prebid.server.util.HttpUtil;
-import org.springframework.util.StringUtils;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -42,16 +43,23 @@ import java.util.stream.Collectors;
  */
 public class BrightrollBidder implements Bidder<BidRequest> {
 
-    private static final String VERSION = "2.5";
+    private static final String OPENRTB_VERSION = "2.5";
     private static final CharSequence OPEN_RTB_VERSION_HEADER = HttpHeaders.createOptimized("x-openrtb-version");
     private static final TypeReference<ExtPrebid<?, ExtImpBrightroll>> BRIGHTROLL_EXT_TYPE_REFERENCE =
             new TypeReference<ExtPrebid<?, ExtImpBrightroll>>() {
             };
 
     private final String endpointUrl;
+    private final JacksonMapper mapper;
+    private final Map<String, PublisherOverride> publisherIdToOverride;
 
-    public BrightrollBidder(String endpointUrl) {
+    public BrightrollBidder(String endpointUrl,
+                            JacksonMapper mapper,
+                            Map<String, PublisherOverride> publisherIdToOverride) {
+
         this.endpointUrl = HttpUtil.validateUrl(Objects.requireNonNull(endpointUrl));
+        this.mapper = Objects.requireNonNull(mapper);
+        this.publisherIdToOverride = Objects.requireNonNull(publisherIdToOverride);
     }
 
     /**
@@ -60,7 +68,14 @@ public class BrightrollBidder implements Bidder<BidRequest> {
     @Override
     public Result<List<HttpRequest<BidRequest>>> makeHttpRequests(BidRequest request) {
         final List<BidderError> errors = new ArrayList<>();
-        final BidRequest updateBidRequest = updateBidRequest(request, errors);
+        final String firstImpExtPublisher;
+        try {
+            firstImpExtPublisher = getAndValidateImpExt(request.getImp().get(0));
+        } catch (PreBidException ex) {
+            return Result.of(Collections.emptyList(), Collections.singletonList(BidderError.badInput(ex.getMessage())));
+        }
+
+        final BidRequest updateBidRequest = updateBidRequest(request, firstImpExtPublisher, errors);
 
         if (CollectionUtils.isEmpty(updateBidRequest.getImp())) {
             errors.add(BidderError.badInput("No valid impression in the bid request"));
@@ -69,23 +84,16 @@ public class BrightrollBidder implements Bidder<BidRequest> {
 
         final String bidRequestBody;
         try {
-            bidRequestBody = Json.encode(updateBidRequest);
+            bidRequestBody = mapper.encode(updateBidRequest);
         } catch (EncodeException e) {
             errors.add(BidderError.badInput(String.format("error while encoding bidRequest, err: %s", e.getMessage())));
             return Result.of(Collections.emptyList(), errors);
         }
 
-        final String publisher;
-        try {
-            publisher = getPublisher(request.getImp().get(0));
-        } catch (PreBidException ex) {
-            return Result.of(Collections.emptyList(), Collections.singletonList(BidderError.badInput(ex.getMessage())));
-        }
-
         return Result.of(Collections.singletonList(
                 HttpRequest.<BidRequest>builder()
                         .method(HttpMethod.POST)
-                        .uri(String.format("%s?publisher=%s", endpointUrl, publisher))
+                        .uri(String.format("%s?publisher=%s", endpointUrl, firstImpExtPublisher))
                         .body(bidRequestBody)
                         .headers(createHeaders(updateBidRequest.getDevice()))
                         .payload(updateBidRequest)
@@ -94,33 +102,55 @@ public class BrightrollBidder implements Bidder<BidRequest> {
     }
 
     /**
-     * Updates {@link BidRequest} with default auction type
-     * and {@link Imp}s if something changed or dropped from the list.
+     * Extracts and validates {@link ExtImpBrightroll} from given impression.
      */
-    private static BidRequest updateBidRequest(BidRequest bidRequest, List<BidderError> errors) {
-        final BidRequest.BidRequestBuilder builder = bidRequest.toBuilder();
-        //Defaulting to first price auction for all prebid requests
-        builder.at(1);
-
-        final List<Imp> imps = bidRequest.getImp();
-        final boolean requiresImpsUpdate = imps.stream().anyMatch(BrightrollBidder::isUpdateRequired);
-        if (requiresImpsUpdate) {
-            builder.imp(imps.stream()
-                    .filter(imp -> isImpValid(imp, errors))
-                    .map(BrightrollBidder::updateImpSize)
-                    .collect(Collectors.toList()));
+    private String getAndValidateImpExt(Imp imp) {
+        final ObjectNode impExt = imp.getExt();
+        if (impExt == null || impExt.size() == 0) {
+            throw new PreBidException("ext.bidder not provided");
         }
-        return builder.build();
+
+        final String publisher;
+        try {
+            publisher = mapper.mapper().convertValue(impExt, BRIGHTROLL_EXT_TYPE_REFERENCE).getBidder().getPublisher();
+        } catch (IllegalArgumentException e) {
+            throw new PreBidException("ext.bidder.publisher not provided");
+        }
+
+        if (StringUtils.isEmpty(publisher)) {
+            throw new PreBidException("publisher is empty");
+        }
+
+        if (!publisherIdToOverride.containsKey(publisher)) {
+            throw new PreBidException("publisher is not valid");
+        }
+
+        return publisher;
     }
 
     /**
-     * Checks if {@link Imp} requires changes.
+     * Updates {@link BidRequest} with default auction type
+     * and {@link Imp}s if something changed or dropped from the list.
      */
-    private static boolean isUpdateRequired(Imp imp) {
-        final Banner banner = imp.getBanner();
-        return (banner == null && imp.getVideo() == null)
-                || (banner != null && banner.getW() == null && banner.getH() == null
-                && CollectionUtils.isNotEmpty(banner.getFormat()));
+    private BidRequest updateBidRequest(BidRequest bidRequest, String firstImpExtPublisher,
+                                        List<BidderError> errors) {
+        final BidRequest.BidRequestBuilder builder = bidRequest.toBuilder();
+        // Defaulting to first price auction for all prebid requests
+        builder.at(1);
+
+        final PublisherOverride publisherOverride = publisherIdToOverride.get(firstImpExtPublisher);
+
+        if (publisherOverride != null) {
+            builder.bcat(publisherOverride.getBcat())
+                    .badv(publisherOverride.getBadv());
+        }
+
+        builder.imp(bidRequest.getImp().stream()
+                .filter(imp -> isImpValid(imp, errors))
+                .map(imp -> updateImp(imp, publisherOverride))
+                .collect(Collectors.toList()));
+
+        return builder.build();
     }
 
     /**
@@ -137,19 +167,31 @@ public class BrightrollBidder implements Bidder<BidRequest> {
     }
 
     /**
-     * Updates {@link Imp} {@link Banner} if required.
+     * Updates {@link Imp} {@link Banner} and/or {@link Video}.
      */
-    private static Imp updateImpSize(Imp imp) {
+    private Imp updateImp(Imp imp, PublisherOverride publisherOverride) {
         final Banner banner = imp.getBanner();
-        if (banner != null && banner.getW() == null && banner.getH() == null
-                && CollectionUtils.isNotEmpty(banner.getFormat())) {
-
-            // update banner with size from first format
-            final Format firstFormat = banner.getFormat().get(0);
+        if (banner != null) {
+            final Banner.BannerBuilder bannerBuilder = banner.toBuilder();
+            if (banner.getW() == null && banner.getH() == null && CollectionUtils.isNotEmpty(banner.getFormat())) {
+                // update banner with size from first format
+                final Format firstFormat = banner.getFormat().get(0);
+                bannerBuilder
+                        .w(firstFormat.getW())
+                        .h(firstFormat.getH());
+            }
+            if (publisherOverride != null) {
+                bannerBuilder.battr(publisherOverride.getImpBattr());
+            }
             return imp.toBuilder()
-                    .banner(banner.toBuilder()
-                            .w(firstFormat.getW())
-                            .h(firstFormat.getH())
+                    .banner(bannerBuilder.build())
+                    .build();
+        }
+        final Video video = imp.getVideo();
+        if (video != null && publisherOverride != null) {
+            return imp.toBuilder()
+                    .video(video.toBuilder()
+                            .battr(publisherOverride.getImpBattr())
                             .build())
                     .build();
         }
@@ -160,13 +202,14 @@ public class BrightrollBidder implements Bidder<BidRequest> {
      * Creates headers for post request with version and {@link Device} properties.
      */
     private MultiMap createHeaders(Device device) {
-        final MultiMap headers = BidderUtil.headers();
+        final MultiMap headers = HttpUtil.headers();
 
-        headers.add(OPEN_RTB_VERSION_HEADER, VERSION);
+        headers.add(OPEN_RTB_VERSION_HEADER, OPENRTB_VERSION);
 
         if (device != null) {
-            HttpUtil.addHeaderIfValueIsNotEmpty(headers, HttpHeaders.USER_AGENT.toString(), device.getUa());
-            HttpUtil.addHeaderIfValueIsNotEmpty(headers, HttpHeaders.ACCEPT_LANGUAGE.toString(), device.getLanguage());
+            HttpUtil.addHeaderIfValueIsNotEmpty(headers, HttpUtil.USER_AGENT_HEADER.toString(), device.getUa());
+            HttpUtil.addHeaderIfValueIsNotEmpty(headers, HttpUtil.ACCEPT_LANGUAGE_HEADER.toString(),
+                    device.getLanguage());
             HttpUtil.addHeaderIfValueIsNotEmpty(headers, HttpUtil.X_FORWARDED_FOR_HEADER.toString(), device.getIp());
             HttpUtil.addHeaderIfValueIsNotEmpty(headers, HttpUtil.DNT_HEADER.toString(),
                     Objects.toString(device.getDnt(), null));
@@ -176,36 +219,12 @@ public class BrightrollBidder implements Bidder<BidRequest> {
     }
 
     /**
-     * Extracts publisher from {@link ExtImpBrightroll}.
-     */
-    private String getPublisher(Imp imp) {
-        final ObjectNode impExt = imp.getExt();
-        if (impExt == null || impExt.size() == 0) {
-            throw new PreBidException("ext.bidder not provided");
-        }
-
-        final String publisher;
-        try {
-            publisher = Json.mapper.<ExtPrebid<?, ExtImpBrightroll>>convertValue(impExt,
-                    BRIGHTROLL_EXT_TYPE_REFERENCE).getBidder().getPublisher();
-        } catch (IllegalArgumentException e) {
-            throw new PreBidException("ext.bidder.publisher not provided");
-        }
-
-        if (StringUtils.isEmpty(publisher)) {
-            throw new PreBidException("publisher is empty");
-        }
-
-        return publisher;
-    }
-
-    /**
      * Converts response to {@link List} of {@link BidderBid}s with {@link List} of errors.
      */
     @Override
     public Result<List<BidderBid>> makeBids(HttpCall<BidRequest> httpCall, BidRequest bidRequest) {
         try {
-            final BidResponse bidResponse = Json.decodeValue(httpCall.getResponse().getBody(), BidResponse.class);
+            final BidResponse bidResponse = mapper.decodeValue(httpCall.getResponse().getBody(), BidResponse.class);
             return extractBids(bidResponse, bidRequest.getImp());
         } catch (DecodeException e) {
             return Result.emptyWithError(BidderError.badServerResponse(e.getMessage()));
